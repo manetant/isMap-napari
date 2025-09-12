@@ -115,6 +115,23 @@ def process_tiff(
         ch_metrics["image"] = os.path.basename(tiff_path) 
         results.append(ch_metrics)
 
+    #release large arrays BEFORE returning
+    try:
+        # Drop per-file heavy objects
+        del stacked_image, channel_images, actin_image
+        del masks, mask_image, binary_mask
+        # If you created cell crops, drop them too
+        try:
+            del cell_crops, valid_labels
+        except NameError:
+            pass
+    except Exception:
+        pass
+    finally:
+        gc.collect()
+        if torch.cuda.is_available():
+            # safe to call once per file; avoids VRAM fragmentation
+            torch.cuda.empty_cache()
     return results
 
 
