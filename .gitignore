@@ -1,0 +1,80 @@
+# =========================
+# Python / General
+# =========================
+__pycache__/
+*.py[cod]
+*.so
+*.dylib
+*.dll
+
+# Byte-compiled / optimized / DLL files
+*.pyo
+*.pyd
+*.pdb
+
+# Unit test / coverage reports
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+.cache/
+*.log
+
+# =========================
+# Packaging / Build
+# =========================
+*.egg-info/
+.eggs/
+build/
+dist/
+*.manifest
+*.spec
+
+# =========================
+# Virtual Environments
+# =========================
+.venv*/
+env/
+venv/
+
+# =========================
+# IDE / Editor
+# =========================
+.vscode/
+.idea/
+*.swp
+
+# =========================
+# Napari / Plugin Artifacts
+# =========================
+*.napari
+*.zarr
+*.ome.tiff
+*.tiff
+*.tif
+*.png
+*.svg
+
+# Results / Outputs
+output*/
+**/tcell-results/
+
+# =========================
+# Data
+# =========================
+test_data/
+
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Project-specific
+# =========================
+test_and_deploy.yml.hold
+
+# Jupyter
+.ipynb_checkpoints/
