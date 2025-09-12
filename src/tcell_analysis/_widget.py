@@ -37,6 +37,7 @@ def tcell_widget():
         output_folder={"widget_type": "FileEdit", "mode": "d", "label": "Output Folder"},
         channel_names={"widget_type": "LineEdit", "label": "Channels (comma-separated)", "value": "ICAM1,pTyr,Actin"},
         num_workers={"widget_type": "SpinBox", "min": 1, "max": 32, "value": 4},
+        save_extracted={"widget_type": "CheckBox", "label": "Save extracted cell crops", "value": True},
         call_button=False,
     )
     def form(
@@ -44,6 +45,7 @@ def tcell_widget():
         output_folder: Path,
         channel_names: str,
         num_workers: int,
+        save_extracted: bool,
     ):
         pass
 
@@ -83,6 +85,7 @@ def tcell_widget():
     ui.append(extra_inputs_box)    # Extra Input Folders
     ui.append(form.channel_names)  # Channels
     ui.append(form.num_workers)    # Num workers
+    ui.append(form.save_extracted) # Save extracted crops
     ui.append(form.output_folder)  # Output Folder
     ui.append(run_btn)             # Run Analysis
     _ = ui.native  # realize main container early
@@ -198,6 +201,7 @@ def tcell_widget():
                     num_workers,
                     progress_callback=None,
                     tag=tag,
+                    save_extracted=bool(form.save_extracted.value),
                 )
                 pbar.n = i
                 pbar.refresh()

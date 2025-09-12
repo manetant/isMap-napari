@@ -12,7 +12,7 @@ from cellpose import utils
 from tifffile import imread, imwrite
 from tqdm import tqdm
 
-from .extract_cells import extract_and_save_cells
+from .extract_cells import extract_cells, save_cells
 from .masking.segment import segment_channel
 from .metrics import calculate_intensity_metrics, extract_features_for_labels
 from .my_utils import convert_nd2_to_tiff, read_any_to_cyx
@@ -27,7 +27,9 @@ def process_tiff(
         channel_names, 
         output_dir, 
         num_workers, 
-        tag: str = ""):
+        tag: str = "",
+        save_extracted: bool = True,
+        make_qc=False):
 
     results = []
 
@@ -40,11 +42,9 @@ def process_tiff(
         channel_images["ICAM1"] = remove_background_rolling_ball(
             channel_images["ICAM1"], radius=25
         )
-
-    all_channels_path = os.path.join(
-        os.path.dirname(tiff_path), "all_channels.png"
-    )
-    save_all_channels_plot(channel_images, all_channels_path)
+    if make_qc:
+        all_channels_path = os.path.join(os.path.dirname(tiff_path), "all_channels.png")
+        save_all_channels_plot(channel_images, all_channels_path)
 
     actin_image = channel_images["Actin"]
     masks, flows, styles, imgs_dn = segment_channel(
@@ -76,8 +76,11 @@ def process_tiff(
 
     frame_name = os.path.splitext(os.path.basename(tiff_path))[0]
 
-    # FOR NOW: deactivate to extracting cell
-    valid_labels = extract_and_save_cells(stacked_image, mask_image, output_dir, frame_name, tile_size=512)
+    cell_crops, valid_labels = extract_cells(stacked_image, mask_image, tile_size=512)
+    
+    # To save extracted cells
+    if save_extracted: 
+        save_cells(cell_crops, output_dir, frame_name)
 
     features_df = extract_features_for_labels(
         mask_image, channel_images, channel_names, valid_labels, num_workers
@@ -99,10 +102,9 @@ def process_tiff(
     features_df.to_csv(csv_out, index=False)
 
     outlines = utils.outlines_list(mask_image)
-    outlined_path = os.path.join(
-        os.path.dirname(tiff_path), "Channels_with_Outlines.png"
-    )
-    save_channel_overlays(channel_images, outlines, outlined_path)
+    if make_qc:
+        outlined_path = os.path.join(os.path.dirname(tiff_path), "Channels_with_Outlines.png")
+        save_channel_overlays(channel_images, outlines, outlined_path)
 
     for channel_name in channel_names:
         ch_metrics = calculate_intensity_metrics(
@@ -123,7 +125,8 @@ def process_image_file(
         input_root, 
         output_root, 
         num_workers, 
-        tag: str = ""):
+        tag: str = "",
+        save_extracted: bool = True,):
     
     case_name = os.path.splitext(os.path.basename(file_path))[0]
     print(f"[INFO] ➤ Processing case: {case_name}")
@@ -147,10 +150,8 @@ def process_image_file(
 
 
     #tiff_path = convert_nd2_to_tiff(file_path, channel_names, tiff_output_dir)
-
-
-    if tiff_path is None or not os.path.isfile(tiff_path):
-        raise FileNotFoundError(f"[ERROR] TIFF conversion failed or file not found: {tiff_path}")
+    #if tiff_path is None or not os.path.isfile(tiff_path):
+    #    raise FileNotFoundError(f"[ERROR] TIFF conversion failed or file not found: {tiff_path}")
 
     tiff_image = cyx #imread(tiff_path)
     results = process_tiff(
@@ -160,6 +161,7 @@ def process_image_file(
         output_folder,
         num_workers,
         tag,
+        save_extracted=save_extracted,
     )
 
     gc.collect()
@@ -175,7 +177,8 @@ def process_folder(
         output_root, 
         num_workers, 
         progress_callback=None, 
-        tag: str = ""):
+        tag: str = "",
+        save_extracted: bool = True, ):
 
     all_results = []
     tasks = []
@@ -184,7 +187,7 @@ def process_folder(
         nd2_files = [f for f in filenames if f.lower().endswith(".nd2")]
         for file_name in nd2_files:
             file_path = os.path.join(dirpath, file_name)
-            tasks.append((file_path, channel_names, input_root, output_root, num_workers, tag))
+            tasks.append((file_path, channel_names, input_root, output_root, num_workers, tag, save_extracted))
 
     if not tasks:
         print("[WARNING] No .nd2 files found in the input directory.")
@@ -223,7 +226,8 @@ def run_analysis(
         channel_names, 
         num_workers=4, 
         progress_callback=None, 
-        tag: str = ""):
+        tag: str = "",
+        save_extracted: bool = True, ):
 
     input_root = str(Path(input_folder))
     output_root = str(Path(output_folder))
@@ -231,6 +235,7 @@ def run_analysis(
         "tag": tag,
         "channels": channel_names,
         "num_workers": num_workers,
+        "save_extracted": save_extracted,
     }, indent=2))
 
     if not os.path.exists(input_root):
@@ -248,7 +253,9 @@ def run_analysis(
         output_root, 
         num_workers, 
         progress_callback, 
-        tag)
+        tag,
+        save_extracted=save_extracted,
+        )
 
 
     df = pd.DataFrame(results)

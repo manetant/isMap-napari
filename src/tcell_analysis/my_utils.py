@@ -17,6 +17,7 @@ def _norm_name(s: str) -> str:
     s = str(s).strip().lower()
     return "".join(ch for ch in s if ch.isalnum() or ch in "+-_.")
 
+
 def _ome_channel_names_from_tiff(path: str) -> Optional[List[str]]:
     """Parse OME-XML Channel@Name (fallback Channel@Fluor). Return None if absent."""
     # guard: only try for .tif/.tiff
@@ -49,6 +50,7 @@ def _ome_channel_names_from_tiff(path: str) -> Optional[List[str]]:
                 return None
     except Exception:
         return None
+
 
 def read_any_to_cyx(
     file_path: str,
@@ -120,10 +122,6 @@ def read_any_to_cyx(
     else:
         cyx = np.squeeze(czyx, axis=1)
 
-    logger.info("CYX shape before reorder: %s", cyx.shape)
-    logger.info("Detected channel names: %s", detected)
-    logger.info("Final channel names (after maps): %s", final_names)
-
     # Reorder (soft)
     if desired_order:
         norm_to_idx = {_norm_name(nm): i for i, nm in enumerate(final_names)}
@@ -135,9 +133,6 @@ def read_any_to_cyx(
         keep = (first_idxs + [i for i in range(len(final_names)) if i not in first_idxs]) if first_idxs else list(range(len(final_names)))
         cyx = cyx[keep]
         final_names = [final_names[i] for i in keep]
-
-    logger.info("CYX shape after reorder: %s", cyx.shape)
-    logger.info("Final channel order: %s", final_names)
     
     cyx = cyx.astype(np.float32, copy=False)
 
@@ -184,7 +179,7 @@ def read_any_to_cyx(
                 compression=compression,
             )
 
-    return combined_tiff_path, final_names
+    return cyx, combined_tiff_path, final_names
 
 
 def convert_nd2_to_tiff(nd2_file_path, channel_names, output_dir):
