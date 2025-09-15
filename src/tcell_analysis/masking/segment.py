@@ -1,9 +1,10 @@
 import threading
 from typing import List, Tuple
 
+import cv2
 import numpy as np
 import torch
-from cellpose import denoise
+from cellpose import models, denoise
 
 _MODEL = None
 _MODEL_CFG = None
@@ -13,14 +14,9 @@ _MODEL_LOCK = threading.Lock()
 def _get_model(
     gpu: bool,
     model_type: str = "cyto3",
-    restore_type: str = "denoise_cyto3",
+    restore_type: str | None = None,
 ):
-    """
-    Create or return a cached CellposeDenoiseModel with the requested config.
-    Caching is per-process. Safe for multi-threaded callers.
-    """
     global _MODEL, _MODEL_CFG
-    # Verify GPU availability only once per request
     use_gpu = bool(gpu and torch.cuda.is_available())
     key = (use_gpu, model_type, restore_type)
 
@@ -29,10 +25,12 @@ def _get_model(
 
     with _MODEL_LOCK:
         if _MODEL is None or _MODEL_CFG != key:
-            # Initialize once
-            _MODEL = denoise.CellposeDenoiseModel(
-                gpu=use_gpu, model_type=model_type, restore_type=restore_type
-            )
+            if restore_type:  # denoise path (slower)
+                _MODEL = denoise.CellposeDenoiseModel(
+                    gpu=use_gpu, model_type=model_type, restore_type=restore_type
+                )
+            else:             # standard path (faster)
+                _MODEL = models.Cellpose(gpu=use_gpu, model_type=model_type)
             _MODEL_CFG = key
     return _MODEL
 
@@ -43,8 +41,9 @@ def segment_channel(
     diameter: int = 200,
     *,
     model_type: str = "cyto3",
-    restore_type: str = "denoise_cyto3",
+    use_denoise: bool = False,
     normalize_input: bool = False,
+    scale: float = 1.0,
 ) -> Tuple[list, list, list, list]:
     """
     Run Cellpose segmentation on a single-channel 2D image.
@@ -58,27 +57,39 @@ def segment_channel(
     if image.ndim != 2:
         raise ValueError(f"segment_channel expects a 2D single-channel image; got shape {image.shape}")
 
-    model = _get_model(gpu=gpu, model_type=model_type, restore_type=restore_type)
+    orig_shape = image.shape
+    if scale != 1.0:
+        new_size = (int(orig_shape[1] * scale), int(orig_shape[0] * scale))
+        img_scaled = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+        diameter = max(1, int(diameter * scale))  # scale diameter
+    else:
+        img_scaled = image
 
-    # Fast, zero-copy-ish preprocessing
-    img = np.asarray(image)
-    if img.dtype != np.float32:
-        img = img.astype(np.float32, copy=False)
-    if normalize_input:
-        # optional light normalization (kept off to match Cellpose's own normalize=True)
-        # img = (img - img.min()) / (img.ptp() + 1e-6)
-        pass
-    img = np.ascontiguousarray(img)
+    model = _get_model(
+        gpu=gpu, model_type=model_type,
+        restore_type="denoise_cyto3" if use_denoise else None
+    )
+
+    img_scaled = np.ascontiguousarray(img_scaled, dtype=np.float32)
 
     # Inference only (no gradients, less overhead)
     with torch.inference_mode():
         masks, flows, styles, imgs_dn = model.eval(
-            [img],                     # keep as list to match Cellpose API
+            [img_scaled],                     # keep as list to match Cellpose API
             diameter=diameter,
             channels=[0, 0],           # 1-channel grayscale
             do_3D=False,
-            normalize=True,            # let Cellpose handle normalization
+            normalize=True,
         )
+
+    # Upsample masks back
+    if scale != 1.0:
+        mask_resized = cv2.resize(
+            masks[0].astype(np.uint16),
+            (orig_shape[1], orig_shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        masks = [mask_resized]
 
     return masks, flows, styles, imgs_dn
 

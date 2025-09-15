@@ -20,6 +20,20 @@ from .preprocessing.background import remove_background_rolling_ball
 from .visualization.flows import save_flow_quiver_plot
 from .visualization.plots import save_all_channels_plot, save_channel_overlays
 
+import time
+from contextlib import contextmanager
+
+@contextmanager
+def timeit(msg):
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        dt = (time.perf_counter() - t0) * 1000
+        print(f"[TIMER] {msg}: {dt:.1f} ms")
+
 
 def process_tiff(
         tiff_image, 
@@ -37,19 +51,24 @@ def process_tiff(
     channel_images = {
         channel_names[i]: stacked_image[i] for i in range(len(channel_names))
     }
-
-    if "ICAM1" in channel_images and channel_images["ICAM1"] is not None:
-        channel_images["ICAM1"] = remove_background_rolling_ball(
-            channel_images["ICAM1"], radius=25
-        )
+    with timeit("background removal (ICAM1)"):
+        if "ICAM1" in channel_images and channel_images["ICAM1"] is not None:
+            channel_images["ICAM1"] = remove_background_rolling_ball(
+                channel_images["ICAM1"], radius=25
+            )
     if make_qc:
         all_channels_path = os.path.join(os.path.dirname(tiff_path), "all_channels.png")
         save_all_channels_plot(channel_images, all_channels_path)
 
     actin_image = channel_images["Actin"]
-    masks, flows, styles, imgs_dn = segment_channel(
-        actin_image, gpu=torch.cuda.is_available(), diameter=200
-    )
+    with timeit("cellpose segmentation"):
+        masks, flows, styles, imgs_dn = segment_channel(
+            actin_image,
+            gpu=torch.cuda.is_available(),
+            diameter=200,
+            model_type="cyto3",
+            scale=0.25,   # scale down the image to 25%
+        )
 
     ''' No need to save flows for now
     rgb_flow = flows[0][0]
@@ -64,19 +83,21 @@ def process_tiff(
     '''
 
     mask_image = masks[0]
-    binary_mask = (masks[0] > 0).astype(np.uint8)
-    cv2.imwrite(
-        os.path.join(os.path.dirname(tiff_path), "Actin_mask_binary.png"),
-        binary_mask * 255,
-    )
-    imwrite(
-        os.path.join(os.path.dirname(tiff_path), "Actin_mask.tiff"),
-        mask_image.astype(np.uint16),
-    )
+    with timeit("write mask images"):
+        binary_mask = (masks[0] > 0).astype(np.uint8)
+        cv2.imwrite(
+            os.path.join(os.path.dirname(tiff_path), "Actin_mask_binary.png"),
+            binary_mask * 255,
+        )
+        imwrite(
+            os.path.join(os.path.dirname(tiff_path), "Actin_mask.tiff"),
+            mask_image.astype(np.uint16),
+        )
 
     frame_name = os.path.splitext(os.path.basename(tiff_path))[0]
 
-    cell_crops, valid_labels = extract_cells(stacked_image, mask_image, tile_size=512)
+    with timeit("extract cells"):
+        cell_crops, valid_labels = extract_cells(stacked_image, mask_image, tile_size=512)
     
     # To save extracted cells
     if save_extracted: 
@@ -130,7 +151,6 @@ def process_tiff(
     finally:
         gc.collect()
         if torch.cuda.is_available():
-            # safe to call once per file; avoids VRAM fragmentation
             torch.cuda.empty_cache()
     return results
 
@@ -212,27 +232,22 @@ def process_folder(
 
     print(f"[INFO] Found {len(tasks)} ND2 files to process.\n")
 
-    with ProcessPoolExecutor(
-        max_workers=min(num_workers, len(tasks))
-    ) as executor:
-        futures = {
-            executor.submit(process_image_file, *args): idx
-            for idx, args in enumerate(tasks)
-        }
-        for i, future in enumerate(
-            tqdm(
-                as_completed(futures),
-                total=len(futures),
-                desc="Processing ND2 files",
-            )
-        ):
-            try:
-                result = future.result()
-                all_results.extend(result)
-            except Exception as e:
-                print(f"[ERROR] A file failed: {e}")
-            if progress_callback:
-                progress_callback(i + 1, len(futures))
+    with ProcessPoolExecutor(max_workers=min(num_workers, len(tasks))) as executor:
+        futures = {executor.submit(process_image_file, *args): args for args in tasks}
+        with tqdm(total=len(futures), desc="Processing ND2 files") as pbar:
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    all_results.extend(result)
+                except Exception as e:
+                    args = futures[future]
+                    print(f"[ERROR] A file failed ({args[0]}): {e}")
+                finally:
+                    pbar.update(1)
+                    if progress_callback:
+                        done = pbar.n
+                        total = pbar.total
+                        progress_callback(done, total)
 
     return all_results
 
