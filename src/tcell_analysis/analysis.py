@@ -16,7 +16,7 @@ from .extract_cells import extract_cells, save_cells
 from .masking.segment import segment_channel
 from .metrics import calculate_intensity_metrics, extract_features_for_labels
 from .my_utils import convert_nd2_to_tiff, read_any_to_cyx
-from .preprocessing.background import remove_background_rolling_ball
+from .preprocessing.background import bg_remove_rolling_ball, bg_remove_gaussian, bg_remove_tophat
 from .visualization.flows import save_flow_quiver_plot
 from .visualization.plots import save_all_channels_plot, save_channel_overlays
 
@@ -33,6 +33,38 @@ def timeit(msg):
             torch.cuda.synchronize()
         dt = (time.perf_counter() - t0) * 1000
         print(f"[TIMER] {msg}: {dt:.1f} ms")
+
+@contextmanager
+def timeit_cpu(msg: str):
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        dt = (time.perf_counter() - t0) * 1000
+        print(f"[TIMER] {msg}: {dt:.1f} ms")
+
+@contextmanager
+def timeit_gpu(msg: str):
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()   # make sure GPU is idle BEFORE timing
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()   # include only the GPU work in this block
+        dt = (time.perf_counter() - t0) * 1000
+        print(f"[TIMER] {msg}: {dt:.1f} ms")
+
+
+def bg_removal(img, method="rolling_ball", radius=25, max_side=256):
+    if method == "rolling_ball":
+        return bg_remove_rolling_ball(img, radius=radius, max_side=max_side)
+    if method == "gaussian":
+        return bg_remove_gaussian(img, radius=radius, max_side=max_side)
+    if method == "tophat":
+        return bg_remove_tophat(img, radius=radius, max_side=max_side)
+    raise ValueError(method)
 
 
 def process_tiff(
@@ -51,11 +83,16 @@ def process_tiff(
     channel_images = {
         channel_names[i]: stacked_image[i] for i in range(len(channel_names))
     }
-    with timeit("background removal (ICAM1)"):
+
+    with timeit_cpu("background removal (ICAM1)"):
         if "ICAM1" in channel_images and channel_images["ICAM1"] is not None:
-            channel_images["ICAM1"] = remove_background_rolling_ball(
-                channel_images["ICAM1"], radius=25
+            channel_images["ICAM1"] = bg_removal(
+                channel_images["ICAM1"],
+                method="rolling_ball",    # try: "gaussian" or "tophat" for big wins
+                radius=25,
+                max_side=256,
             )
+
     if make_qc:
         all_channels_path = os.path.join(os.path.dirname(tiff_path), "all_channels.png")
         save_all_channels_plot(channel_images, all_channels_path)
