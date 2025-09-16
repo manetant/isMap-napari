@@ -1,362 +1,268 @@
-import glob
-import os
+# --- paste the whole function below, keep your imports at top ---
 from pathlib import Path
-
-import cv2
 import numpy as np
 import pandas as pd
+from tifffile import imread
+import dask.array as da
+from dask import delayed
 from magicgui import magicgui
 from magicgui.widgets import Container, FileEdit, PushButton
-from tifffile import imread
-
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from qtpy.QtWidgets import QWidget, QVBoxLayout
-
 
 def show_analysis_results(
     viewer,
     output_folder,
     channel_names,
-    tasks_with_tags,
+    tasks_with_tags,             # kept for API compatibility (unused now)
     text_feature=None,
     text_size=11,
     text_color="yellow",
     rgb=False,
 ):
-    # safe default
-    if text_feature is None:
-        text_feature = ["circularity"]
-
-    # --- Build robust mapping from inputs to tags ---
-    inputs_info = []
-    for in_path, tag in tasks_with_tags:
-        p = Path(in_path)
-        try:
-            p_res = p.resolve()
-        except Exception:
-            p_res = p
-        inputs_info.append(
-            {
-                "path": p_res,
-                "name": p.name,
-                "stem": p.stem,
-                "tag": tag,
-            }
-        )
-
-    print(f"[INFO] Loading results from: {output_folder}")
-    print(tasks_with_tags)
-
-    root = Path(output_folder)
-
-    # Find all case directories that actually contain results
-    csv_hits = sorted(root.rglob("per_cell_features.csv"))
-    mask_hits = sorted(root.rglob("Actin_mask.tiff"))
-
-    if not csv_hits and not mask_hits:
-        raise ValueError(
-            f"No results found under {root}.\n"
-            "Looked for 'per_cell_features.csv' and 'Actin_mask.tiff' recursively."
-        )
-
-    # Unique parent directories that hold each frame
-    frame_dirs = sorted({p.parent for p in (csv_hits + mask_hits)})
-
-    # --- Infer a tag per frame_dir with multiple heuristics ---
-    def infer_tag_for_frame_dir(fd: Path) -> str:
-        """Return the most plausible tag for a given frame directory."""
-        try:
-            fd_res = fd.resolve()
-        except Exception:
-            fd_res = fd
-
-        # 1) Exact ancestor name match (basename or stem of input)
-        ancestor_names = {anc.name for anc in [fd_res, *fd_res.parents]}
-        anc_lower = {n.casefold() for n in ancestor_names}
-        for info in inputs_info:
-            if info["name"].casefold() in anc_lower or info["stem"].casefold() in anc_lower:
-                return info["tag"]
-
-        # 2) Input path containment (the output lives under the input folder tree)
-        for info in inputs_info:
-            try:
-                common = Path(os.path.commonpath([str(fd_res), str(info["path"])]))
-                if common == info["path"]:
-                    return info["tag"]
-            except Exception:
-                pass
-
-        # 3) Any path part contains the input name/stem (case-insensitive substring)
-        parts_lower = [part.casefold() for part in fd_res.parts]
-        for info in inputs_info:
-            name_l, stem_l = info["name"].casefold(), info["stem"].casefold()
-            if any((name_l in part) or (stem_l in part) for part in parts_lower):
-                return info["tag"]
-
-        # 4) Tag itself appears in the path (some pipelines write tags into output dirs)
-        for info in inputs_info:
-            tag_l = str(info["tag"]).casefold()
-            if any(tag_l in part for part in parts_lower):
-                return info["tag"]
-
-        # No match
-        print(
-            f"[TAG] N/A for frame_dir={fd_res}; inputs checked="
-            f"{[(i['path'], i['name'], i['stem'], i['tag']) for i in inputs_info]}"
-        )
-        return "N/A"
-
-    frame_names = [fd.name for fd in frame_dirs]
-    frame_tags = [infer_tag_for_frame_dir(fd) for fd in frame_dirs]
-
-    image_stack = []
-    mask_stack = []
-
-    all_coords = []
-    all_texts = []
-    all_properties_lists = {}
-    all_columns = set()
-
-    def _normalize_to_uint8(img: np.ndarray) -> np.ndarray:
-        """Normalize image to uint8 regardless of channel order (C,H,W) or (H,W,C) or 2D."""
+    # ---------- helpers ----------
+    def compute_clims_per_channel(img):
+        """img is (H,W) or (H,W,C) channels-last; returns list of (low, high)."""
         if img.ndim == 2:
-            norm = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-            return norm
-        if img.ndim == 3:
-            # heuristic: channel axis is whichever has size <= 8 typically
-            # fallback to assuming channels-first if ambiguous
-            c_axis = 0 if img.shape[0] <= 8 else (2 if img.shape[-1] <= 8 else 0)
-            # move channels to axis 0
-            if c_axis == 2:
-                img_c0 = np.transpose(img, (2, 0, 1))
-            elif c_axis == 0:
-                img_c0 = img
-            else:
-                img_c0 = img  # safe default
+            p1, p99 = np.percentile(img, (1, 99))
+            return [(float(p1), float(p99))]
+        C = img.shape[-1]
+        clims = []
+        for c in range(C):
+            p1, p99 = np.percentile(img[..., c], (1, 99))
+            clims.append((float(p1), float(p99)))
+        return clims
 
-            out = np.zeros_like(img_c0, dtype=np.uint8)
-            for c in range(img_c0.shape[0]):
-                out[c] = cv2.normalize(img_c0[c], None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    def find_image_path(frame_dir: Path) -> Path:
+        """Prefer <frame_name>.tiff, otherwise first non-mask *.tif* in frame_dir."""
+        name = frame_dir.name
+        p = frame_dir / f"{name}.tiff"
+        if p.exists():
+            return p
+        cands = [
+            q for q in frame_dir.glob("*.tif*")
+            if q.name.lower() != "actin_mask.tiff" and "mask" not in q.name.lower()
+        ]
+        if not cands:
+            raise FileNotFoundError(f"No multi-channel TIFF in {frame_dir}")
+        return sorted(cands)[0]
 
-            # return in the same layout as input
-            if c_axis == 2:
-                return np.transpose(out, (1, 2, 0))
-            else:
-                return out
-        raise ValueError(f"Unsupported image ndim={img.ndim}")
+    def _eager_load_image_for_shape(path: Path):
+        """Load image and return channels-last (H,W,C)."""
+        arr = imread(str(path))
+        if arr.ndim == 3 and arr.shape[0] < arr.shape[-1]:
+            # channels-first -> channels-last
+            arr = np.transpose(arr, (1, 2, 0))
+        elif arr.ndim == 2:
+            arr = arr[..., None]
+        return arr
 
-    def load_frame_data(frame_dir):
-        frame_dir = Path(frame_dir)
-        frame_name = frame_dir.name
+    def lazy_image_array(path: Path) -> da.Array:
+        """Lazy dask array of (H,W,C) for napari, using one eager read for shape/dtype."""
+        sample = _eager_load_image_for_shape(path)
+        return da.from_delayed(
+            delayed(_eager_load_image_for_shape)(path),
+            shape=sample.shape,
+            dtype=sample.dtype,
+        )
 
-        # The main multi-channel image: try "<frame_name>.tiff" first; otherwise any *.tif*
-        image_path = frame_dir / f"{frame_name}.tiff"
-        if not image_path.exists():
-            candidates = [
-                p for p in frame_dir.glob("*.tif*")
-                if p.name.lower() != "actin_mask.tiff" and "mask" not in p.name.lower()
-            ]
-            if not candidates:
-                raise FileNotFoundError(f"No multi-channel TIFF found in {frame_dir}")
-            image_path = sorted(candidates)[0]
-
-        mask_path = frame_dir / "Actin_mask.tiff"
-        csv_path = frame_dir / "per_cell_features.csv"
-
-        for path in [image_path, mask_path, csv_path]:
-            if not path.exists():
-                raise FileNotFoundError(f"Missing required file: {path}")
-
-        image = imread(str(image_path))
-        image_uint8 = _normalize_to_uint8(image)
+    def load_mask_and_df(fd: Path):
+        """Load mask + per_cell_features.csv and return (mask, df_with_index, tag)."""
+        mask_path = fd / "Actin_mask.tiff"
+        csv_path  = fd / "per_cell_features.csv"
+        if not mask_path.exists():
+            raise FileNotFoundError(mask_path)
+        if not csv_path.exists():
+            raise FileNotFoundError(csv_path)
 
         mask = imread(str(mask_path))
-        df = pd.read_csv(csv_path).set_index("label")
-        return image_uint8, mask, df
+        df   = pd.read_csv(csv_path)
 
-    # Discover union of all properties
-    for frame_dir in frame_dirs:
-        _, _, df = load_frame_data(frame_dir)
-        all_columns.update(df.columns)
+        # minimal schema guard
+        for req in ("label", "y", "x"):
+            if req not in df.columns:
+                raise ValueError(f"{csv_path} missing required column: {req}")
 
-    all_columns = sorted(all_columns)
-    for col in all_columns:
-        all_properties_lists[col] = []
+        tag = str(df["tag"].iloc[0]) if "tag" in df.columns and len(df) else "N/A"
+        df = df.set_index("label")
+        return mask, df, tag
 
-    # Load frames and build coordinates/properties/text
-    for frame_index, frame_dir in enumerate(frame_dirs):
-        image, mask, df = load_frame_data(frame_dir)
+    # ---------- discover frames ----------
+    root = Path(output_folder)
+    mask_hits = sorted(root.rglob("Actin_mask.tiff"))
+    if not mask_hits:
+        raise ValueError(f"No Actin_mask.tiff under {root}")
 
-        # Ensure images become (H,W,C) for rgb=True path or per-channel display
-        if image.ndim == 3 and image.shape[0] < image.shape[-1]:
-            # channels-first → to channels-last
-            image = np.transpose(image, (1, 2, 0))
-        elif image.ndim == 2:
-            image = image[..., np.newaxis]
+    frame_dirs = sorted({p.parent for p in mask_hits})
 
-        image_stack.append(image)
-        mask_stack.append(mask)
+    # Load lightweight things eagerly (mask/CSV/tag) and collect image paths
+    image_paths, masks, dfs, frame_tags = [], [], [], []
+    for fd in frame_dirs:
+        try:
+            mask, df, tag = load_mask_and_df(fd)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"[WARN] Skipping {fd}: {e}")
+            continue
+        masks.append(mask)
+        dfs.append(df)
+        frame_tags.append(tag)
+        try:
+            image_paths.append(find_image_path(fd))
+        except FileNotFoundError as e:
+            print(f"[WARN] Skipping image for {fd}: {e}")
+            image_paths.append(None)
 
-        for label_id in df.index:
-            row = df.loc[label_id]
-            y, x = float(row["y"]), float(row["x"])
-            all_coords.append((frame_index, y, x))
-            for col in all_columns:
-                val = row.get(col, np.nan)
-                all_properties_lists[col].append(val)
+    if len(dfs) == 0:
+        raise ValueError("Found frames, but none had both mask and per_cell_features.csv.")
 
-            lines = [f"ID {label_id}"]
-            for feature in text_feature:
-                val = row.get(feature, "N/A")
-                if pd.isna(val):
-                    val_str = "N/A"
-                elif isinstance(val, (float, int)):
-                    val_str = f"{val:.2f}"
-                else:
-                    val_str = str(val)
-                lines.append(f"{feature}: {val_str}")
-            all_texts.append("\n".join(lines))
+    # Keep list of frame names for overlay/exports
+    frame_names = [Path(p).parent.name if p is not None else Path(dfs[i].index.name or f"frame_{i}").name
+                   for i, p in enumerate(image_paths)]
 
-    if len(image_stack) == 0:
-        raise ValueError("No images found to display. Did analysis finish successfully?")
-    else:
-        image_stack = np.stack(image_stack, axis=0)
+    # ---------- build lazy image stack ----------
+    # Some frames might be missing an image; filter those out consistently
+    valid_idxs = [i for i, p in enumerate(image_paths) if p is not None]
+    if not valid_idxs:
+        raise ValueError("No frame images found to display.")
 
-    if len(mask_stack) > 0:
-        mask_stack = np.stack(mask_stack, axis=0)
-    else:
-        print("[WARN] No masks found to display.")
-        mask_stack = None
+    image_arrays = [lazy_image_array(image_paths[i]) for i in valid_idxs]  # each (H,W,C)
+    image_stack  = da.stack(image_arrays, axis=0)                          # (F,H,W,C) over valid frames
 
-    all_coords_np = np.array(all_coords)
-    all_texts_list = list(all_texts)
-    # ✅ fixed dict-comprehension
-    all_properties = {col: np.array(vals) for col, vals in all_properties_lists.items()}
+    # Use first valid frame for contrast limits
+    first_frame = _eager_load_image_for_shape(image_paths[valid_idxs[0]])
+    clims = compute_clims_per_channel(first_frame)
 
-    # Keep originals for filtering
-    original_coords_np = all_coords_np.copy()
-    original_texts_list = all_texts_list.copy()
-    original_properties = {k: v.copy() for k, v in all_properties.items()}
+    # ---------- add image layers (one per channel) ----------
+    num_channels = int(image_stack.shape[-1])
+    # names for channels
+    ch_names = list(channel_names)[:num_channels] + [f"Ch{c}" for c in range(len(channel_names), num_channels)]
 
-    # --- Add image layers ---
-    if rgb:
-        if image_stack.shape[-1] < 3:
-            for i, name in enumerate(channel_names):
-                viewer.add_image(
-                    image_stack[..., i],
-                    name=name,
-                    colormap="gray",
-                    blending="additive",
-                    opacity=1.0,
-                )
+    if rgb and num_channels >= 3:
+        viewer.add_image(
+            image_stack[..., :3],
+            name="RGB Composite",
+            rgb=True,
+            opacity=1.0,
+            # heuristic using first 3 channel clims
+            contrast_limits=(clims[0][0], clims[min(2, len(clims)-1)][1]) if clims else None,
+        )
+    # always add separate grayscale layers
+    for c in range(num_channels):
+        viewer.add_image(
+            image_stack[..., c],  # (F,H,W)
+            name=ch_names[c],
+            colormap="gray",
+            blending="additive",
+            opacity=1.0,
+            contrast_limits=clims[c] if c < len(clims) else None,
+            metadata={"channel_index": c},
+        )
+
+    # ---------- labels stack ----------
+    # Only include masks for valid image frames (to keep leading axis aligned)
+    masks_valid = [masks[i] for i in valid_idxs]
+    mask_stack = np.stack(masks_valid, axis=0)
+    if not np.issubdtype(mask_stack.dtype, np.integer):
+        mask_stack = mask_stack.astype(np.int32, copy=False)
+    viewer.add_labels(mask_stack, name="Mask Stack")
+
+    # ---------- points/properties/text (vectorized) ----------
+    # Align dfs and tags to valid_idxs too
+    dfs_valid  = [dfs[i] for i in valid_idxs]
+    tags_valid = [frame_tags[i] for i in valid_idxs]
+    names_valid = [frame_dirs[i].name for i in valid_idxs]
+
+    # union of columns across frames
+    all_columns = sorted(set().union(*[set(df.columns) for df in dfs_valid]))
+    prop_chunks = {col: [] for col in all_columns}
+    all_coords = []
+    all_texts = []
+
+    if text_feature is None:
+        text_feature = ["circularity"]
+    feat_cols = text_feature if isinstance(text_feature, (list, tuple)) else [text_feature]
+    fmt = "ID {label}\n" + "\n".join(f"{f}: {{{f}}}" for f in feat_cols if f)
+
+    for fi, df in enumerate(dfs_valid):
+        # coords: (N,3) = (frame, y, x)
+        yx = df[["y", "x"]].to_numpy(dtype=float, copy=False)
+        z  = np.full((len(df), 1), fi, dtype=float)
+        coords = np.concatenate([z, yx], axis=1)
+        all_coords.append(coords)
+
+        # properties
+        for col in all_columns:
+            if col in df.columns:
+                prop_chunks[col].append(df[col].to_numpy(copy=False))
+            else:
+                prop_chunks[col].append(np.full((len(df),), np.nan))
+
+        # texts
+        df_reset = df.reset_index()
+        if fmt.endswith("ID {label}\n"):  # no feature lines requested
+            texts = df_reset.apply(lambda r: f"ID {r['label']}", axis=1)
         else:
-            viewer.add_image(
-                image_stack[..., :3],
-                name="RGB Composite",
-                rgb=True,
-                opacity=1.0,
-            )
-    else:
-        for i, name in enumerate(channel_names):
-            viewer.add_image(
-                image_stack[..., i],
-                name=name,
-                colormap="gray",
-                blending="additive",
-                opacity=1.0,
-            )
+            texts = df_reset.apply(lambda r: fmt.format(**{k: str(v) for k, v in r.items()}), axis=1)
+        all_texts.extend(list(texts))
 
-    # --- Add labels ONCE ---
-    if mask_stack is not None:
-        viewer.add_labels(mask_stack, name="Mask Stack")
+    all_coords_np  = np.vstack(all_coords)
+    all_properties = {col: np.concatenate(chunks) for col, chunks in prop_chunks.items()}
+    texts_list     = list(all_texts)
 
-    # --- Points layer with properties/text ---
     points = viewer.add_points(
-        original_coords_np,
+        all_coords_np,
         name="Cell Labels",
         size=5,
-        face_color="transparent",
-        properties=original_properties,
+        face_color="none",
+        properties=all_properties,
     )
     points.edge_color = "red"
-    points.text = {
-        "string": original_texts_list,
-        "size": text_size,
-        "color": text_color,
-        "anchor": "center",
-    }
+    points.text = {"string": texts_list, "size": text_size, "color": text_color, "anchor": "center"}
 
-    # --- Overlay that updates when the user changes frame ---
+    # ---------- overlay using CSV tag ----------
+    viewer.text_overlay.visible = True
+    viewer.text_overlay.position = "top_left"
+
     def _update_overlay(event=None):
-        # the leading axis is the "frame" axis we stacked on
-        if viewer.dims.ndim == 0:
-            idx = 0
+        if viewer.dims.ndim and viewer.dims.current_step:
+            idx = int(viewer.dims.current_step[0])
         else:
-            idx = int(viewer.dims.current_step[0]) if len(viewer.dims.current_step) > 0 else 0
-
-        idx = max(0, min(idx, len(frame_names) - 1))
-        viewer.text_overlay.text = f"Frame: {frame_names[idx]}   |   Group: {frame_tags[idx]}"
-        viewer.text_overlay.position = "top_left"
-        viewer.text_overlay.visible = True
+            idx = 0
+        idx = max(0, min(idx, len(names_valid) - 1))
+        n_cells = int((mask_stack[idx] > 0).sum())
+        viewer.text_overlay.text = f"Frame: {names_valid[idx]} | Group: {tags_valid[idx]} | Cells: {n_cells}"
 
     viewer.dims.events.current_step.connect(_update_overlay)
     _update_overlay()
 
-    # --- Filtering widget ---
+    # ---------- filtering widget (range sliders are nicer, but keep your sliders) ----------
     @magicgui(
         auto_call=True,
-        circularity={
-            "label": "Circularity",
-            "widget_type": "FloatSlider",
-            "min": 0,
-            "max": 1,
-            "step": 0.1,
-            "value": 0.3,
-        },
-        eccentricity={
-            "label": "Eccentricity",
-            "widget_type": "FloatSlider",
-            "min": 0,
-            "max": 1,
-            "step": 0.1,
-            "value": 0,
-        },
-        diameter={
-            "label": "Diameter",
-            "widget_type": "FloatSlider",
-            "min": 0,
-            "max": 200,
-            "step": 10,
-            "value": 20,
-        },
+        circularity={"label": "Circularity", "widget_type": "FloatSlider", "min": 0, "max": 1, "step": 0.1, "value": 0.3},
+        eccentricity={"label": "Eccentricity", "widget_type": "FloatSlider", "min": 0, "max": 1, "step": 0.1, "value": 0.0},
+        diameter={"label": "Diameter", "widget_type": "FloatSlider", "min": 0, "max": 200, "step": 10, "value": 20},
     )
     def filter_points(circularity, eccentricity, diameter):
-        if (
-            "circularity" not in original_properties
-            or "eccentricity" not in original_properties
-            or "equivalent_diameter" not in original_properties
-        ):
+        need = ("circularity", "eccentricity", "equivalent_diameter")
+        if any(col not in all_properties for col in need):
             print("[WARNING] Required property missing. Cannot filter.")
             return
 
-        circ = original_properties["circularity"]
-        ecc = original_properties["eccentricity"]
-        diam = original_properties["equivalent_diameter"]
+        circ = all_properties["circularity"]
+        ecc  = all_properties["eccentricity"]
+        diam = all_properties["equivalent_diameter"]
 
         mask = (circ >= circularity) & (ecc >= eccentricity) & (diam >= diameter)
+        idx = np.nonzero(mask)[0]
 
-        if mask.shape[0] != original_coords_np.shape[0]:
-            print("[WARNING] Property mask length mismatch with original data. Skipping filter.")
-            return
+        points.data        = all_coords_np[mask]
+        points.text.values = [texts_list[i] for i in idx]
+        points.properties  = {k: v[mask] for k, v in all_properties.items()}
 
-        points.data = original_coords_np[mask]
-        points.text.values = [original_texts_list[i] for i in range(len(original_texts_list)) if mask[i]]
-        points.properties = {k: v[mask] for k, v in original_properties.items()}
+    viewer.window.add_dock_widget(filter_points, area="right", name="Filter Cells")
 
-    viewer.window.add_dock_widget(filter_points, area="right")
-
-    # Figure + canvas embedded in Qt
+    # ---------- boxplot (tags from CSV) ----------
     fig, ax = plt.subplots()
     canvas = FigureCanvas(fig)
     panel = QWidget()
@@ -364,9 +270,12 @@ def show_analysis_results(
     _panel_layout.setContentsMargins(6, 6, 6, 6)
     _panel_layout.addWidget(canvas)
 
-    # Find available mean-intensity metrics from properties (e.g., "Actin_mean_intensity")
-    mean_intensity_metrics = [k for k in original_properties.keys() if k.endswith("_mean_intensity")]
-    default_metric = "Actin_mean_intensity" if "Actin_mean_intensity" in mean_intensity_metrics else (mean_intensity_metrics[0] if mean_intensity_metrics else None)
+    mean_intensity_metrics = [k for k in all_properties if k.endswith("_mean_intensity")]
+    default_metric = (
+        "Actin_mean_intensity"
+        if "Actin_mean_intensity" in mean_intensity_metrics
+        else (mean_intensity_metrics[0] if mean_intensity_metrics else None)
+    )
 
     def _plot_box(metric: str | None):
         ax.clear()
@@ -375,7 +284,6 @@ def show_analysis_results(
             canvas.draw_idle()
             return
 
-        # CURRENT filtered points only
         coords = points.data
         if coords.size == 0:
             ax.set_title("No points after filtering")
@@ -384,78 +292,58 @@ def show_analysis_results(
 
         frame_idx = coords[:, 0].astype(int)
         intens = np.asarray(points.properties[metric])
-        # Map frame index -> tag
-        Groups = [frame_tags[i] for i in frame_idx]
+        groups = [tags_valid[i] for i in frame_idx]
 
-        df_plot = pd.DataFrame({"Group": Groups, metric: intens})
-        # Ensure deterministic order by tag
-        groups = []
-        labels = []
+        df_plot = pd.DataFrame({"Group": groups, metric: intens})
+        buckets, labels = [], []
         for tag, g in df_plot.groupby("Group", sort=True):
-            groups.append(g[metric].values)
+            buckets.append(g[metric].values)
             labels.append(str(tag))
 
-        if len(groups) == 0:
+        if len(buckets) == 0:
             ax.set_title("No data to plot")
             canvas.draw_idle()
             return
 
-        ax.boxplot(groups, labels=labels, showfliers=True)
+        ax.boxplot(buckets, labels=labels, showfliers=True)
         ax.set_xlabel("Group")
         ax.set_ylabel(metric)
         ax.set_title(f"{metric} by Group")
-        for label in ax.get_xticklabels():
-            label.set_rotation(20)
-            label.set_ha("right")
+        for lab in ax.get_xticklabels():
+            lab.set_rotation(20)
+            lab.set_ha("right")
         fig.tight_layout()
         canvas.draw_idle()
 
-    # Control widget to pick metric + auto-refresh
-    @magicgui(
-        auto_call=True,
-        metric={"label": "Metric", "choices": mean_intensity_metrics, "value": default_metric},
-    )
+    @magicgui(auto_call=True, metric={"label": "Metric", "choices": mean_intensity_metrics, "value": default_metric})
     def boxplot_controls(metric: str = default_metric):
         _plot_box(metric)
 
-    # Keep the plot in sync when filters change (points layer updates)
     def _on_points_changed(event=None):
-        # Reuse current selection in the control
-        cur_metric = boxplot_controls.metric.value if hasattr(boxplot_controls, "metric") else default_metric
-        _plot_box(cur_metric)
+        cur = boxplot_controls.metric.value if hasattr(boxplot_controls, "metric") else default_metric
+        _plot_box(cur)
 
     points.events.data.connect(_on_points_changed)
-    # Initial draw
     _plot_box(default_metric)
 
-    def _safe_add_dock(widget, name, area="right"):
-        # Prefer public API
-        docks = getattr(viewer.window, "dock_widgets", [])
+    # add both to UI (remove any stale docks with same names first)
+    def _add_unique_dock(widget, name, area="right"):
         try:
-            # NapariDockWidget usually has `.name`; Qt dock has `.windowTitle()`
-            for dw in list(docks):
-                dw_name = getattr(dw, "name", None)
-                if dw_name is None:
-                    try:
-                        dw_name = dw.windowTitle()
-                    except Exception:
-                        dw_name = None
+            for dw in list(getattr(viewer.window, "dock_widgets", [])):
+                dw_name = getattr(dw, "name", None) or getattr(dw, "windowTitle", lambda: None)()
                 if dw_name == name:
                     viewer.window.remove_dock_widget(dw)
         except Exception:
-            # Fallback for very old napari versions (no .dock_widgets)
             pass
-
         viewer.window.add_dock_widget(widget, area=area, name=name)
 
-    _safe_add_dock(panel, "Intensity Boxplot")
-    _safe_add_dock(boxplot_controls, "Boxplot Controls")
-    # Add both the plot and its controls to the napari UI
-    #viewer.window.add_dock_widget(panel, area="right", name="Intensity Boxplot")
-    #viewer.window.add_dock_widget(boxplot_controls, area="right", name="Boxplot Controls")
+    _add_unique_dock(panel, "Intensity Boxplot")
+    _add_unique_dock(boxplot_controls, "Boxplot Controls")
 
-    # --- Export UI ---
+    # ---------- export UI ----------
     default_export_path = Path(output_folder) / "filtered_points_export.csv"
+    default_export_path.parent.mkdir(parents=True, exist_ok=True)
+
     save_path_picker = FileEdit(label="Save CSV", mode="w", value=str(default_export_path))
     export_button = PushButton(label="Export CSV")
 
@@ -464,28 +352,26 @@ def show_analysis_results(
             print("[INFO] No points to export.")
             return
 
-        output_path = str(save_path_picker.value)
-        if not output_path.endswith(".csv"):
-            output_path += ".csv"
+        out_path = str(save_path_picker.value)
+        if not out_path.endswith(".csv"):
+            out_path += ".csv"
 
         filtered_coords = points.data
-        filtered_properties = points.properties
+        filtered_props  = points.properties
 
         data = {
             "frame_index": filtered_coords[:, 0],
             "y": filtered_coords[:, 1],
             "x": filtered_coords[:, 2],
         }
-        for prop_name, prop_vals in filtered_properties.items():
+        for prop_name, prop_vals in filtered_props.items():
             data[prop_name] = prop_vals
 
-        frame_names_from_idx = [frame_names[int(idx)] for idx in filtered_coords[:, 0]]
-        data["frame_name"] = frame_names_from_idx
-        data["frame_tag"] = [frame_tags[int(idx)] for idx in filtered_coords[:, 0]]
+        data["frame_name"] = [names_valid[int(i)] for i in filtered_coords[:, 0]]
+        data["frame_tag"]  = [tags_valid[int(i)]  for i in filtered_coords[:, 0]]
 
-        df_out = pd.DataFrame(data)
-        df_out.to_csv(output_path, index=False)
-        viewer.status = f"✅ Exported filtered points to: {output_path}"
+        pd.DataFrame(data).to_csv(out_path, index=False)
+        viewer.status = f"✅ Exported filtered points to: {out_path}"
 
     export_button.changed.connect(_do_export)
     export_widget = Container(widgets=[save_path_picker, export_button])
