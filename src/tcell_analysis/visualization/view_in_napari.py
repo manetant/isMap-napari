@@ -20,8 +20,30 @@ def show_analysis_results(
     text_size=11,
     text_color="yellow",
     rgb=False,
+    initial_ranges=None,           # NEW: dict like {"circularity": (0.3, 1.0), ...}
+    on_filter_change=None, 
+    show_filter: bool = True,
+    show_boxplot: bool = True,
 ):
+    if initial_ranges is None:
+        initial_ranges = {}
+
     # ---------- helpers ----------
+    def _remove_dock(name_or_widget):
+        # napari supports removing by name string or widget
+        try:
+            viewer.window.remove_dock_widget(name_or_widget)
+            return
+        except Exception:
+            pass
+        # fallback: look into private registry if present
+        try:
+            d = getattr(viewer.window, "_dock_widgets", {})
+            if isinstance(name_or_widget, str) and name_or_widget in d:
+                viewer.window.remove_dock_widget(d[name_or_widget])
+        except Exception:
+            pass
+
     def compute_clims_per_channel(img):
         """img is (H,W) or (H,W,C) channels-last; returns list of (low, high)."""
         if img.ndim == 2:
@@ -139,13 +161,14 @@ def show_analysis_results(
     ch_names = list(channel_names)[:num_channels] + [f"Ch{c}" for c in range(len(channel_names), num_channels)]
 
     if rgb and num_channels >= 3:
+        lows  = [clims[i][0] for i in range(min(3, len(clims)))]
+        highs = [clims[i][1] for i in range(min(3, len(clims)))]
         viewer.add_image(
             image_stack[..., :3],
             name="RGB Composite",
             rgb=True,
             opacity=1.0,
-            # heuristic using first 3 channel clims
-            contrast_limits=(clims[0][0], clims[min(2, len(clims)-1)][1]) if clims else None,
+            contrast_limits=(min(lows), max(highs)) if clims else None,
         )
     # always add separate grayscale layers
     for c in range(num_channels):
@@ -237,108 +260,122 @@ def show_analysis_results(
     _update_overlay()
 
     # ---------- filtering widget (range sliders are nicer, but keep your sliders) ----------
-    @magicgui(
-        auto_call=True,
-        circularity={"label": "Circularity", "widget_type": "FloatSlider", "min": 0, "max": 1, "step": 0.1, "value": 0.3},
-        eccentricity={"label": "Eccentricity", "widget_type": "FloatSlider", "min": 0, "max": 1, "step": 0.1, "value": 0.0},
-        diameter={"label": "Diameter", "widget_type": "FloatSlider", "min": 0, "max": 200, "step": 10, "value": 20},
-    )
-    def filter_points(circularity, eccentricity, diameter):
-        need = ("circularity", "eccentricity", "equivalent_diameter")
-        if any(col not in all_properties for col in need):
-            print("[WARNING] Required property missing. Cannot filter.")
-            return
+    # defaults if not provided
+    if show_filter:
+        c_rng = tuple(initial_ranges.get("circularity", (0.0, 1.0)))
+        d_rng = tuple(initial_ranges.get("equivalent_diameter", (0, 200)))
 
-        circ = all_properties["circularity"]
-        ecc  = all_properties["eccentricity"]
-        diam = all_properties["equivalent_diameter"]
+        @magicgui(
+            auto_call=True,
+            # IMPORTANT: use FloatRangeSlider for floats; RangeSlider remains for ints
+            circularity={"widget_type": "FloatRangeSlider", "min": 0.0, "max": 1.0, "step": 0.1, "value": c_rng, "label": "circularity"},
+            diameter={"widget_type": "RangeSlider", "min": 0, "max": 200, "step": 10, "value": d_rng, "label": "equivalent_diameter"},
+        )    
+        def filter_points(circularity, diameter):
+            circ = all_properties.get("circularity")
+            diam = all_properties.get("equivalent_diameter")
+            if circ is None or diam is None:
+                print("[WARNING] Missing properties for filter.")
+                return
 
-        mask = (circ >= circularity) & (ecc >= eccentricity) & (diam >= diameter)
-        idx = np.nonzero(mask)[0]
+            cmin, cmax = circularity
+            dmin, dmax = diameter
+            mask = (
+                (circ >= cmin) & (circ <= cmax) &
+                (diam >= dmin) & (diam <= dmax)
+            )
 
-        points.data        = all_coords_np[mask]
-        points.text.values = [texts_list[i] for i in idx]
-        points.properties  = {k: v[mask] for k, v in all_properties.items()}
+            idx = np.nonzero(mask)[0]
+            points.data         = all_coords_np[mask]
+            points.text.values  = [texts_list[i] for i in idx]
+            points.properties   = {k: v[mask] for k, v in all_properties.items()}
 
-    viewer.window.add_dock_widget(filter_points, area="right", name="Filter Cells")
+            # NEW: bubble up the current ranges so the widget can remember them
+            if callable(on_filter_change):
+                on_filter_change({
+                    "circularity": (float(cmin), float(cmax)),
+                    "equivalent_diameter": (float(dmin), float(dmax)),
+                })
 
-    # ---------- boxplot (tags from CSV) ----------
-    fig, ax = plt.subplots()
-    canvas = FigureCanvas(fig)
-    panel = QWidget()
-    _panel_layout = QVBoxLayout(panel)
-    _panel_layout.setContentsMargins(6, 6, 6, 6)
-    _panel_layout.addWidget(canvas)
-
-    mean_intensity_metrics = [k for k in all_properties if k.endswith("_mean_intensity")]
-    default_metric = (
-        "Actin_mean_intensity"
-        if "Actin_mean_intensity" in mean_intensity_metrics
-        else (mean_intensity_metrics[0] if mean_intensity_metrics else None)
-    )
-
-    def _plot_box(metric: str | None):
-        ax.clear()
-        if metric is None or metric not in points.properties:
-            ax.set_title("No mean-intensity metric found")
-            canvas.draw_idle()
-            return
-
-        coords = points.data
-        if coords.size == 0:
-            ax.set_title("No points after filtering")
-            canvas.draw_idle()
-            return
-
-        frame_idx = coords[:, 0].astype(int)
-        intens = np.asarray(points.properties[metric])
-        groups = [tags_valid[i] for i in frame_idx]
-
-        df_plot = pd.DataFrame({"Group": groups, metric: intens})
-        buckets, labels = [], []
-        for tag, g in df_plot.groupby("Group", sort=True):
-            buckets.append(g[metric].values)
-            labels.append(str(tag))
-
-        if len(buckets) == 0:
-            ax.set_title("No data to plot")
-            canvas.draw_idle()
-            return
-
-        ax.boxplot(buckets, labels=labels, showfliers=True)
-        ax.set_xlabel("Group")
-        ax.set_ylabel(metric)
-        ax.set_title(f"{metric} by Group")
-        for lab in ax.get_xticklabels():
-            lab.set_rotation(20)
-            lab.set_ha("right")
-        fig.tight_layout()
-        canvas.draw_idle()
-
-    @magicgui(auto_call=True, metric={"label": "Metric", "choices": mean_intensity_metrics, "value": default_metric})
-    def boxplot_controls(metric: str = default_metric):
-        _plot_box(metric)
-
-    def _on_points_changed(event=None):
-        cur = boxplot_controls.metric.value if hasattr(boxplot_controls, "metric") else default_metric
-        _plot_box(cur)
-
-    points.events.data.connect(_on_points_changed)
-    _plot_box(default_metric)
-
-    # add both to UI (remove any stale docks with same names first)
-    def _add_unique_dock(widget, name, area="right"):
         try:
             for dw in list(getattr(viewer.window, "dock_widgets", [])):
-                dw_name = getattr(dw, "name", None) or getattr(dw, "windowTitle", lambda: None)()
-                if dw_name == name:
+                nm = getattr(dw, "name", None) or getattr(dw, "windowTitle", lambda: None)()
+                if nm == "Filter Cells":
                     viewer.window.remove_dock_widget(dw)
         except Exception:
             pass
-        viewer.window.add_dock_widget(widget, area=area, name=name)
+        viewer.window.add_dock_widget(filter_points.native, area="right", name="Filter Cells")
 
-    _add_unique_dock(panel, "Intensity Boxplot")
-    _add_unique_dock(boxplot_controls, "Boxplot Controls")
+    # ---------- boxplot (tags from CSV) ----------
+    if show_boxplot:
+        _remove_dock("Intensity Boxplot")
+        _remove_dock("Boxplot Controls")
+
+        fig, ax = plt.subplots()
+        canvas = FigureCanvas(fig)
+        panel = QWidget()
+        _panel_layout = QVBoxLayout(panel)
+        _panel_layout.setContentsMargins(6, 6, 6, 6)
+        _panel_layout.addWidget(canvas)
+
+        mean_intensity_metrics = [k for k in all_properties if k.endswith("_mean_intensity")]
+        default_metric = (
+            "Actin_mean_intensity"
+            if "Actin_mean_intensity" in mean_intensity_metrics
+            else (mean_intensity_metrics[0] if mean_intensity_metrics else None)
+        )
+
+        def _plot_box(metric: str | None):
+            ax.clear()
+            if metric is None or metric not in points.properties:
+                ax.set_title("No mean-intensity metric found")
+                canvas.draw_idle()
+                return
+
+            coords = points.data
+            if coords.size == 0:
+                ax.set_title("No points after filtering")
+                canvas.draw_idle()
+                return
+
+            frame_idx = coords[:, 0].astype(int)
+            intens = np.asarray(points.properties[metric])
+            groups = [tags_valid[i] for i in frame_idx]
+
+            df_plot = pd.DataFrame({"Group": groups, metric: intens})
+            buckets, labels = [], []
+            for tag, g in df_plot.groupby("Group", sort=True):
+                buckets.append(g[metric].values)
+                labels.append(str(tag))
+
+            if len(buckets) == 0:
+                ax.set_title("No data to plot")
+                canvas.draw_idle()
+                return
+
+            ax.boxplot(buckets, labels=labels, showfliers=True)
+            ax.set_xlabel("Group")
+            ax.set_ylabel(metric)
+            ax.set_title(f"{metric} by Group")
+            for lab in ax.get_xticklabels():
+                lab.set_rotation(20)
+                lab.set_ha("right")
+            fig.tight_layout()
+            canvas.draw_idle()
+
+        @magicgui(auto_call=True, metric={"label": "Metric", "choices": mean_intensity_metrics, "value": default_metric})
+        def boxplot_controls(metric: str = default_metric):
+            _plot_box(metric)
+
+        def _on_points_changed(event=None):
+            cur = boxplot_controls.metric.value if hasattr(boxplot_controls, "metric") else default_metric
+            _plot_box(cur)
+
+        points.events.data.connect(_on_points_changed)
+        _plot_box(default_metric)
+
+        viewer.window.add_dock_widget(panel, area="right", name="Intensity Boxplot")
+        viewer.window.add_dock_widget(boxplot_controls, area="right", name="Boxplot Controls")
 
     # ---------- export UI ----------
     default_export_path = Path(output_folder) / "filtered_points_export.csv"

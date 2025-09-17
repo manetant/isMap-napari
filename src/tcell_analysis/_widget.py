@@ -1,37 +1,100 @@
 # src/tcell_analysis/_widget.py
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple
+
+import os
 
 from magicgui import magicgui
 from magicgui.widgets import Container, PushButton, FileEdit, Label
-
 from napari.qt.threading import thread_worker
 from napari.utils import progress
 from napari import current_viewer
-
-from qtpy.QtWidgets import QInputDialog, QApplication
+from qtpy.QtWidgets import QInputDialog, QApplication, QDialog, QListWidget, QListWidgetItem, QVBoxLayout, QPushButton, QDialogButtonBox
+from qtpy.QtCore import Qt 
 
 from .analysis import run_analysis
 from .visualization.view_in_napari import show_analysis_results
-from typing import Dict, List, Optional, Tuple
-
-import logging
-logger = logging.getLogger(__name__)
 
 
 @dataclass
 class RowState:
-    tag: str = ""          # the tag provided for this input
-    tagged_path: str = ""  # which path that tag corresponds to (debounce)
+    tag: str = ""
+    tagged_path: str = ""
+    conditions_by_subfolder: Dict[str, str] = field(default_factory=dict)
+    conditions_for_path: str = ""
+
+
+def _iter_immediate_subfolders(base: Path) -> List[Path]:
+    if not base or not base.exists() or not base.is_dir():
+        return []
+    try:
+        return [p for p in base.iterdir() if p.is_dir()]
+    except Exception:
+        return []
+
+
+def _prompt_text(parent, title: str, label: str, default: str) -> str | None:
+    txt, ok = QInputDialog.getText(parent.native if hasattr(parent, "native") else parent, title, label, text=default)
+    if ok and str(txt).strip():
+        return str(txt).strip()
+    return None
+
+
+def _ask_conditions_for_subfolders(parent_widget, base_path: Path,
+                                   existing: Dict[str, str] | None = None) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    subfolders = _iter_immediate_subfolders(base_path)
+    for sub in sorted(subfolders):
+        key = sub.name
+        default = (existing or {}).get(key, key)
+        val = _prompt_text(parent_widget, "Assign condition", f"Enter condition for:\n{key}", default)
+        mapping[key] = val if val is not None else default
+    return mapping
+
+
+def _choose_conditions_dialog(parent, pairs: List[Tuple[Path, str]]) -> List[Tuple[Path, str]]:
+    """
+    Show a checkbox list of (path, label) and return the checked subset.
+    'label' should be the condition/tag shown to user.
+    """
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Select conditions to segment")
+    lay = QVBoxLayout(dlg)
+    lst = QListWidget(dlg)
+    lst.setSelectionMode(QListWidget.NoSelection)
+    for p, label in pairs:
+        item = QListWidgetItem(f"{label}  —  {p.name}")
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked)   # preselect all
+        item.setData(Qt.UserRole, (str(p), label))  # use UserRole
+        lst.addItem(item)
+    lay.addWidget(lst)
+    btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dlg)
+    lay.addWidget(btns)
+    btns.accepted.connect(dlg.accept)
+    btns.rejected.connect(dlg.reject)
+    if dlg.exec_() != QDialog.Accepted:
+        return []
+    out: List[Tuple[Path, str]] = []
+    for i in range(lst.count()):
+        it = lst.item(i)
+        if it.checkState():
+            p_str, label = it.data(Qt.UserRole)
+            out.append((Path(p_str), label))
+    return out
 
 
 def tcell_widget():
-    # --- state ---
-    primary_state = RowState()                    # track tag for primary input
-    extra_rows: list[FileEdit] = []              # list of extra FileEdits
-    state_by_row: dict[FileEdit, RowState] = {}  # tag/state for each extra
+    # ---------- STATE ----------
+    primary = RowState()
+    extra_rows: List[FileEdit] = []
+    state_by_row: Dict[FileEdit, RowState] = {}
 
-    # --- base form (your original fields, without call_button) ---
+    # store filter thresholds picked during “Run Segmentation”
+    filter_ranges: Dict[str, tuple] = {}
+
+    # ---------- BASE FORM ----------
     @magicgui(
         input_folder={"widget_type": "FileEdit", "mode": "d", "label": "Input Folder"},
         output_folder={"widget_type": "FileEdit", "mode": "d", "label": "Output Folder"},
@@ -47,181 +110,264 @@ def tcell_widget():
         num_workers: int,
         save_extracted: bool,
     ):
-        pass
+        ...
 
-    # Prompt for tag once when the PRIMARY input is chosen (debounced by path)
     @form.input_folder.changed.connect
-    def _on_primary_input_changed(path: Path | None):
+    def _on_primary_changed(path: Path | None):
         if not path:
             return
         cur = str(path)
-        # Default output next to the first chosen input
         if not form.output_folder.value:
-            form.output_folder.value = Path(cur).parent / "tcell-results"
-        # Only prompt if this path wasn't tagged before
-        if primary_state.tagged_path != cur:
-            t, ok = QInputDialog.getText(
-                form.native, "Tag this input", "Enter a tag (e.g., Treatment A):"
-            )
-            if ok and str(t).strip():
-                primary_state.tag = str(t).strip()
-                primary_state.tagged_path = cur
+            form.output_folder.value = Path(cur) / "tcell-results"
 
-    # --- extra inputs UI ---
+        subs = _iter_immediate_subfolders(Path(cur))
+        if subs:
+            if primary.conditions_for_path != cur or not primary.conditions_by_subfolder:
+                primary.conditions_by_subfolder = _ask_conditions_for_subfolders(form, Path(cur), primary.conditions_by_subfolder if primary.conditions_for_path == cur else None)
+                primary.conditions_for_path = cur
+            primary.tag = ""; primary.tagged_path = ""
+        else:
+            if primary.tagged_path != cur:
+                default = Path(cur).name
+                t = _prompt_text(form, "Tag this input", f"Enter a tag for “{default}”:", default)
+                primary.tag = t or ""
+                primary.tagged_path = cur
+            primary.conditions_by_subfolder.clear(); primary.conditions_for_path = ""
+
+    # ---------- EXTRA INPUTS ----------
     add_btn = PushButton(label="+ Add input")
+    extra_box = Container(layout="vertical", labels=True, scrollable=False)
+    extra_box.native.setMaximumHeight(220)
 
-    # Start NON-scrollable to avoid first-click no-op; enable after first row is added
-    extra_inputs_box = Container(layout="vertical", labels=True, scrollable=False)
-    extra_inputs_box.native.setMaximumHeight(200)
-    _ = extra_inputs_box.native  # realize early
-
-    # --- run button (create before building ui) ---
-    run_btn = PushButton(label="Run Analysis")
-
-    # --- layout: Input → +Add → extras → Channels → Num workers → Output → Run ---
-    ui = Container(layout="vertical", labels=True)
-    ui.append(form.input_folder)   # Input Folder
-    ui.append(add_btn)             # + Add input
-    ui.append(extra_inputs_box)    # Extra Input Folders
-    ui.append(form.channel_names)  # Channels
-    ui.append(form.num_workers)    # Num workers
-    ui.append(form.save_extracted) # Save extracted crops
-    ui.append(form.output_folder)  # Output Folder
-    ui.append(run_btn)             # Run Analysis
-    _ = ui.native  # realize main container early
-
-    # --- helper to add a new extra row ---
     def _make_extra_row():
-        fe = FileEdit(mode="d", label="Choose Directory", value=None)
-        _ = fe.native  # realize before insertion
-        fe.native.setMinimumWidth(400)
-
+        fe = FileEdit(mode="d", label="Input Folder", value=None)
+        fe.native.setMinimumWidth(420)
         st = RowState()
         state_by_row[fe] = st
 
         @fe.changed.connect
-        def _on_extra_changed(_=None):
+        def _on_extra(_=None):
             cur = str(fe.value or "")
             if not cur:
                 return
             if not form.output_folder.value:
-                form.output_folder.value = Path(cur).parent / "tcell-results"
-            if st.tagged_path != cur:
-                t, ok = QInputDialog.getText(
-                    fe.native, "Tag this input", "Enter a tag (e.g., Treatment B):"
-                )
-                if ok and str(t).strip():
-                    st.tag = str(t).strip()
+                form.output_folder.value = Path(cur) / "tcell-results"
+            subs = _iter_immediate_subfolders(Path(cur))
+            if subs:
+                st.conditions_by_subfolder = _ask_conditions_for_subfolders(fe, Path(cur), st.conditions_by_subfolder if st.conditions_for_path == cur else None)
+                st.conditions_for_path = cur
+                st.tag = ""; st.tagged_path = ""
+            else:
+                if st.tagged_path != cur:
+                    default = Path(cur).name
+                    t = _prompt_text(fe, "Tag this input", f"Enter a tag for “{default}”:", default)
+                    st.tag = t or ""
                     st.tagged_path = cur
+                st.conditions_by_subfolder.clear(); st.conditions_for_path = ""
 
-        # Create a label for the extra input
-        label = Label(value=f"Extra Input {len(extra_rows) + 1}")
-
-        # Put the FileEdit inside a small row container for more stable layouting
         row = Container(layout="horizontal", labels=False)
-        row.append(label)
+        row.append(Label(value=f"Extra Input {len(extra_rows)+1}"))
         row.append(fe)
-        _ = row.native  # realize row container
-
         extra_rows.append(fe)
-        extra_inputs_box.append(row)
+        extra_box.append(row)
 
-        # Enable scrolling after the FIRST row appears
-        if len(extra_rows) == 1 and not extra_inputs_box.scrollable:
-            extra_inputs_box.scrollable = True
-            # Realize the new scroll area widgets promptly
-            _ = extra_inputs_box.native
+        if len(extra_rows) == 1 and not extra_box.scrollable:
+            extra_box.scrollable = True
 
-        # --- force layout + paint so the row shows immediately on first click ---
-        # Inner content (the extras box)
-        if extra_inputs_box.native.layout() is not None:
-            extra_inputs_box.native.layout().activate()
-        extra_inputs_box.native.updateGeometry()
-        extra_inputs_box.refresh()
-
-        # Outer container
-        if ui.native.layout() is not None:
-            ui.native.layout().activate()
-        ui.native.updateGeometry()
-        ui.refresh()
-
+        for w in (extra_box.native,):
+            if w.layout() is not None:
+                w.layout().activate()
+            w.updateGeometry()
         QApplication.processEvents()
 
-    # Use MagicGUI's signal (not .native.clicked)
     @add_btn.changed.connect
-    def _on_add_clicked():
+    def _on_add(_=None):
         _make_extra_row()
 
-    # --- run button ---
-    @run_btn.changed.connect
-    def _run_all():
+    # ---------- BUILD UI ORDER ----------
+    run_seg_btn = PushButton(label="Run Segmentation")
+    run_all_btn = PushButton(label="Run Analysis")
+
+    ui = Container(layout="vertical", labels=True)
+    ui.append(form.input_folder)
+    ui.append(add_btn)
+    ui.append(extra_box)
+    ui.append(form.channel_names)
+    ui.append(form.num_workers)
+    ui.append(form.save_extracted)
+    ui.append(form.output_folder)
+    ui.append(run_seg_btn)   # first stage
+    ui.append(run_all_btn)   # second stage
+
+    # ---------- GATHER ALL CASES (utility) ----------
+    def _gather_all_cases() -> List[Tuple[Path, str]]:
+        tasks: List[Tuple[Path, str]] = []
+
+        # primary
+        if form.input_folder.value:
+            base = Path(form.input_folder.value)
+            subs = _iter_immediate_subfolders(base)
+            if subs:
+                if not primary.conditions_by_subfolder:
+                    primary.conditions_by_subfolder = _ask_conditions_for_subfolders(form, base, None)
+                    primary.conditions_for_path = str(base)
+                for s in sorted(subs):
+                    tasks.append((s, primary.conditions_by_subfolder.get(s.name, s.name)))
+            else:
+                if not primary.tag.strip():
+                    t = _prompt_text(form, "Tag this input", f"Enter a tag for “{base.name}”:", base.name)
+                    if t:
+                        primary.tag = t; primary.tagged_path = str(base)
+                if primary.tag.strip():
+                    tasks.append((base, primary.tag))
+
+        # extras
+        for fe in extra_rows:
+            if not fe.value:
+                continue
+            st = state_by_row.get(fe, RowState())
+            base = Path(fe.value)
+            subs = _iter_immediate_subfolders(base)
+            if subs:
+                if not st.conditions_by_subfolder:
+                    st.conditions_by_subfolder = _ask_conditions_for_subfolders(fe, base, None)
+                    st.conditions_for_path = str(base)
+                for s in sorted(subs):
+                    tasks.append((s, st.conditions_by_subfolder.get(s.name, s.name)))
+            else:
+                if not st.tag.strip():
+                    t = _prompt_text(fe, "Tag this input", f"Enter a tag for “{base.name}”:", base.name)
+                    if t:
+                        st.tag = t; st.tagged_path = str(base)
+                        state_by_row[fe] = st
+                if st.tag.strip():
+                    tasks.append((base, st.tag))
+        return tasks
+
+    # ---------- RUN SEGMENTATION (pilot) ----------
+    @run_seg_btn.changed.connect
+    def _run_segmentation(_=None):
         viewer = current_viewer()
         if viewer is None:
             return
-        out_dir = form.output_folder.value
-        if not out_dir:
+        if not form.output_folder.value:
             viewer.status = "⚠️ Please choose an Output Folder."
             return
-        out_dir = Path(out_dir)
+        out_dir = Path(form.output_folder.value)
+
+        all_cases = _gather_all_cases()
+        if not all_cases:
+            viewer.status = "⚠️ No inputs configured."
+            return
+
+        # let user choose which conditions to segment now
+        chosen = _choose_conditions_dialog(viewer.window._qt_window, [(p, t) for p, t in all_cases])
+        if not chosen:
+            viewer.status = "ℹ️ Segmentation cancelled."
+            return
+
         chan_list = [c.strip() for c in form.channel_names.value.split(",") if c.strip()]
-        num_workers = int(form.num_workers.value)
-
-        tasks: list[tuple[Path, str]] = []
-
-        # Primary input: require tag to already be set (no reprompt here)
-        if not form.input_folder.value:
-            viewer.status = "⚠️ Please choose the primary Input Folder."
-            return
-        if not primary_state.tag.strip():
-            viewer.status = "⚠️ Tag missing for primary input. Click the Input Folder field again to set it."
-            return
-        tasks.append((Path(form.input_folder.value), primary_state.tag))
-
-        # Extra inputs: require tag to already be set (no reprompt here)
-        for fe in extra_rows:
-            if not fe.value:
-                viewer.status = "⚠️ One of the extra inputs is empty."
-                return
-            st = state_by_row.get(fe)
-            if not st or not st.tag.strip():
-                viewer.status = "⚠️ Tag missing for one of the extra inputs. Click that Input Folder to set it."
-                return
-            tasks.append((Path(fe.value), st.tag))
-
-        viewer.status = "⚙️ Running analysis for: " + ", ".join(p.name for p, _ in tasks)
+        n_workers = int(form.num_workers.value)
 
         @thread_worker
         def _worker():
-            pbar = progress(desc="T Cell Analysis (batch)", total=len(tasks))
-            for i, (in_dir, tag) in enumerate(tasks, start=1):
+            pbar = progress(desc="Segmentation (pilot)", total=len(chosen))
+            for i, (p, tag) in enumerate(chosen, start=1):
                 run_analysis(
-                    str(in_dir),
-                    str(out_dir),  # single shared output folder
+                    str(p),
+                    str(out_dir),
                     chan_list,
-                    num_workers,
+                    n_workers,
                     progress_callback=None,
                     tag=tag,
                     save_extracted=bool(form.save_extracted.value),
                 )
-                pbar.n = i
-                pbar.refresh()
-            return str(out_dir), tasks
+                pbar.n = i; pbar.refresh()
+            return str(out_dir), chosen
 
-        def _done(result):
-            out_path, tasks_with_tags = result
-            viewer.status = "✅ Batch completed."
+        def _done(res):
+            out_path, selected_cases = res
+            viewer.status = "✅ Segmentation done. Adjust filters, then Run Analysis."
+            # hook: capture user filter settings while they move sliders
+            def _on_filter_change(ranges: Dict[str, tuple]):
+                filter_ranges.clear()
+                filter_ranges.update(ranges)
             try:
-                show_analysis_results(viewer, out_path, chan_list, tasks_with_tags)
+                show_analysis_results(
+                    viewer,
+                    out_path,
+                    chan_list,
+                    selected_cases,
+                    initial_ranges=filter_ranges.copy(),   # seed if we had prior
+                    on_filter_change=_on_filter_change,
+                    show_filter=True,
+                    show_boxplot=False,
+                )
             except Exception as e:
                 viewer.status = f"⚠️ Visualization warning: {e}"
 
         def _err(e):
             viewer.status = f"❌ Error: {e}"
 
-        w = _worker()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
-        w.start()
+        w = _worker(); w.returned.connect(_done); w.errored.connect(_err); w.start()
+
+    # ---------- RUN ANALYSIS (full batch) ----------
+    @run_all_btn.changed.connect
+    def _run_all(_=None):
+        viewer = current_viewer()
+        if viewer is None:
+            return
+        if not form.output_folder.value:
+            viewer.status = "⚠️ Please choose an Output Folder."
+            return
+        out_dir = Path(form.output_folder.value)
+
+        all_cases = _gather_all_cases()
+        if not all_cases:
+            viewer.status = "⚠️ No inputs configured."
+            return
+
+        chan_list = [c.strip() for c in form.channel_names.value.split(",") if c.strip()]
+        n_workers = int(form.num_workers.value)
+
+        @thread_worker
+        def _worker():
+            pbar = progress(desc="Full Analysis", total=len(all_cases))
+            for i, (p, tag) in enumerate(all_cases, start=1):
+                run_analysis(
+                    str(p),
+                    str(out_dir),
+                    chan_list,
+                    n_workers,
+                    progress_callback=None,
+                    tag=tag,
+                    save_extracted=bool(form.save_extracted.value),
+                )
+                pbar.n = i; pbar.refresh()
+            return str(out_dir), all_cases
+
+        def _done(res):
+            out_path, tasks_with_tags = res
+            viewer.status = "✅ Analysis completed."
+            # seed viewer with the thresholds user picked during the pilot
+            try:
+                show_analysis_results(
+                    viewer,
+                    out_path,
+                    chan_list,
+                    tasks_with_tags,
+                    initial_ranges=filter_ranges.copy(),
+                    on_filter_change=None,
+                    show_filter=False,
+                    show_boxplot=True,
+                )
+            except Exception as e:
+                viewer.status = f"⚠️ Visualization warning: {e}"
+
+        def _err(e):
+            viewer.status = f"❌ Error: {e}"
+
+        w = _worker(); w.returned.connect(_done); w.errored.connect(_err); w.start()
 
     return ui
 
