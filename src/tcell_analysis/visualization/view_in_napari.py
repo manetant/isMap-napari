@@ -10,6 +10,7 @@ from magicgui.widgets import Container, FileEdit, PushButton
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from qtpy.QtWidgets import QWidget, QVBoxLayout
+import re
 
 def show_analysis_results(
     viewer,
@@ -29,6 +30,34 @@ def show_analysis_results(
     if initial_ranges is None:
         initial_ranges = {}
 
+    # Tag we place on all layers we add so we can clean them up later
+    PLUGIN_TAG = "tcell_analysis_layers"
+
+    def _base(nm: str) -> str:
+        # strip napari's auto-suffix like "ICAM1 [1]"
+        m = re.match(r"^(.*) \[\d+\]$", nm)
+        return m.group(1) if m else nm
+
+    def _purge_old_layers():
+        # names we might create in this function
+        expected = set(["RGB Composite", "Mask Stack", "Cell Labels"])
+        expected.update(ch_names)  # ICAM1, pTyr, Actin, etc.
+
+        to_remove = []
+        for layer in list(viewer.layers):
+            # 1) remove anything we previously added (by metadata tag)
+            if getattr(layer, "metadata", None) and layer.metadata.get(PLUGIN_TAG):
+                to_remove.append(layer)
+                continue
+            # 2) also remove layers whose *base* name matches what we are about to add
+            if _base(layer.name) in expected:
+                to_remove.append(layer)
+
+        for l in to_remove:
+            try:
+                viewer.layers.remove(l)
+            except Exception:
+                pass
     # ---------- helpers ----------
     def _remove_dock(name_or_widget):
         # napari supports removing by name string or widget
@@ -161,6 +190,8 @@ def show_analysis_results(
     # names for channels
     ch_names = list(channel_names)[:num_channels] + [f"Ch{c}" for c in range(len(channel_names), num_channels)]
 
+    _purge_old_layers()
+
     if rgb and num_channels >= 3:
         lows  = [clims[i][0] for i in range(min(3, len(clims)))]
         highs = [clims[i][1] for i in range(min(3, len(clims)))]
@@ -170,7 +201,9 @@ def show_analysis_results(
             rgb=True,
             opacity=1.0,
             contrast_limits=(min(lows), max(highs)) if clims else None,
+            metadata={PLUGIN_TAG: True},
         )
+
     # always add separate grayscale layers
     for c in range(num_channels):
         viewer.add_image(
@@ -180,8 +213,9 @@ def show_analysis_results(
             blending="additive",
             opacity=1.0,
             contrast_limits=clims[c] if c < len(clims) else None,
-            metadata={"channel_index": c},
+            metadata={"channel_index": c, PLUGIN_TAG: True},
         )
+
 
     # ---------- labels stack ----------
     # Only include masks for valid image frames (to keep leading axis aligned)
@@ -189,7 +223,7 @@ def show_analysis_results(
     mask_stack = np.stack(masks_valid, axis=0)
     if not np.issubdtype(mask_stack.dtype, np.integer):
         mask_stack = mask_stack.astype(np.int32, copy=False)
-    viewer.add_labels(mask_stack, name="Mask Stack")
+    viewer.add_labels(mask_stack, name="Mask Stack", metadata={PLUGIN_TAG: True})
 
     # ---------- points/properties/text (vectorized) ----------
     # Align dfs and tags to valid_idxs too
@@ -240,7 +274,9 @@ def show_analysis_results(
         size=5,
         face_color="none",
         properties=all_properties,
+        metadata={PLUGIN_TAG: True},
     )
+
     points.edge_color = "red"
     points.text = {"string": texts_list, "size": text_size, "color": text_color, "anchor": "center"}
 

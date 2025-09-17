@@ -19,7 +19,10 @@ from .my_utils import convert_nd2_to_tiff, read_any_to_cyx
 from .preprocessing.background import bg_remove_rolling_ball, bg_remove_gaussian, bg_remove_tophat
 from .visualization.flows import save_flow_quiver_plot
 from .visualization.plots import save_all_channels_plot, save_channel_overlays
+from typing import Union
+from typing import Any, Dict, List
 
+import tempfile
 import time
 from contextlib import contextmanager
 
@@ -56,6 +59,145 @@ def timeit_gpu(msg: str):
         dt = (time.perf_counter() - t0) * 1000
         print(f"[TIMER] {msg}: {dt:.1f} ms")
 
+CODE_VERSION = "2025-09-17.1"
+
+
+def _to_jsonable(v: Any) -> Any:
+    if isinstance(v, (np.floating,)):
+        return float(v)
+    if isinstance(v, (np.integer,)):
+        return int(v)
+    if isinstance(v, np.ndarray):
+        return v.tolist()
+    # torch tensors, if any sneak in:
+    try:
+        import torch
+        if isinstance(v, torch.Tensor):
+            return v.detach().cpu().tolist()
+    except Exception:
+        pass
+    return v
+
+def _jsonify_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [{k: _to_jsonable(v) for k, v in rec.items()} for rec in records]
+
+def _save_cached_metrics(case_dir: Union[str, Path], results: List[Dict[str, Any]]) -> None:
+    p = _cache_metrics_path(case_dir)
+    tmp = str(p) + ".tmp"
+    data = _jsonify_records(results)
+    Path(tmp).write_text(json.dumps(data, indent=2))
+    os.replace(tmp, str(p))
+
+def _atomic_replace(tmp_path: str, final_path: str) -> None:
+    os.replace(tmp_path, final_path)  # atomic on POSIX/NT
+
+def _atomic_write_png(img: np.ndarray, final_path: str) -> None:
+    final = Path(final_path)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    # Use a temp file **with .png suffix**
+    with tempfile.NamedTemporaryFile(dir=final.parent, prefix=final.stem + ".", suffix=".png", delete=False) as tmp:
+        tmp_name = tmp.name
+    ok = cv2.imwrite(tmp_name, img)
+    if not ok:
+        # clean up temp file if present
+        try: os.remove(tmp_name)
+        except Exception: pass
+        raise RuntimeError(f"Failed to write PNG (OpenCV): {tmp_name}")
+    os.replace(tmp_name, final)
+
+def _atomic_write_tiff(arr: np.ndarray, final_path: str) -> None:
+    final = Path(final_path)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    # Use a temp file **with .tif/.tiff suffix**
+    suffix = final.suffix if final.suffix.lower() in {".tif", ".tiff"} else ".tiff"
+    with tempfile.NamedTemporaryFile(dir=final.parent, prefix=final.stem + ".", suffix=suffix, delete=False) as tmp:
+        tmp_name = tmp.name
+    imwrite(tmp_name, arr)
+    os.replace(tmp_name, final)
+
+def _atomic_write_csv(df: pd.DataFrame, final_path: str) -> None:
+    final = Path(final_path)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    tmp = final.with_suffix(final.suffix + ".tmp")
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, final)
+
+def _done_json_path(case_dir: str | Path) -> Path:
+    return Path(case_dir) / "DONE.json"
+
+def _lock_path(case_dir: str | Path) -> Path:
+    return Path(case_dir) / ".lock"
+
+def _cache_metrics_path(case_dir: str | Path) -> Path:
+    return Path(case_dir) / "channel_metrics.json"
+
+def _acquire_lock(lock_path: Path) -> bool:
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+
+def _release_lock(lock_path: Path) -> None:
+    try:
+        lock_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+def _outputs_complete(case_dir: str | Path) -> bool:
+    case_dir = Path(case_dir)
+    return (case_dir / "Actin_mask.tiff").exists() and (case_dir / "per_cell_features.csv").exists()
+
+def _read_done_version(case_dir: str | Path) -> str | None:
+    p = _done_json_path(case_dir)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+        return str(data.get("code_version"))
+    except Exception:
+        return None
+
+def _write_done(case_dir: str | Path, *, tag: str, image: str, channels: list[str], code_version: str) -> None:
+    meta = {
+        "tag": tag,
+        "image": image,
+        "channels": list(channels),
+        "code_version": code_version,
+        "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    tmp = str(_done_json_path(case_dir)) + ".tmp"
+    Path(tmp).write_text(json.dumps(meta, indent=2))
+    _atomic_replace(tmp, str(_done_json_path(case_dir)))
+
+
+def _load_cached_metrics(case_dir: Union[str, Path]) -> List[Dict[str, Any]]:
+    p = _cache_metrics_path(case_dir)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text())
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def _approximate_metrics_from_csv(csv_path: Path, tag: str, image_name: str | None = None) -> list[dict]:
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception:
+        return []
+    if image_name is None and "image" in df.columns and len(df):
+        image_name = str(df["image"].iloc[0])
+    cols = [c for c in df.columns if c.endswith("_mean_intensity")]
+    out: list[dict] = []
+    for col in cols:
+        ch = col[: -len("_mean_intensity")]
+        vals = pd.to_numeric(df[col], errors="coerce").dropna()
+        if len(vals) == 0:
+            continue
+        out.append({"channel": ch, "tag": tag, "image": image_name or "", "N": int(len(vals)), "mean_intensity": float(vals.mean())})
+    return out
 
 def bg_removal(img, method="rolling_ball", radius=25, max_side=256):
     if method == "rolling_ball":
@@ -120,16 +262,9 @@ def process_tiff(
     '''
 
     mask_image = masks[0]
-    with timeit("write mask images"):
-        binary_mask = (masks[0] > 0).astype(np.uint8)
-        cv2.imwrite(
-            os.path.join(os.path.dirname(tiff_path), "Actin_mask_binary.png"),
-            binary_mask * 255,
-        )
-        imwrite(
-            os.path.join(os.path.dirname(tiff_path), "Actin_mask.tiff"),
-            mask_image.astype(np.uint16),
-        )
+    binary_mask = (masks[0] > 0).astype(np.uint8)
+    _atomic_write_png(binary_mask * 255, os.path.join(os.path.dirname(tiff_path), "Actin_mask_binary.png"))
+    _atomic_write_tiff(mask_image.astype(np.uint16), os.path.join(os.path.dirname(tiff_path), "Actin_mask.tiff"))
 
     frame_name = os.path.splitext(os.path.basename(tiff_path))[0]
 
@@ -157,7 +292,7 @@ def process_tiff(
 
     csv_out = os.path.join(os.path.dirname(tiff_path), "per_cell_features.csv")
     print(f"[INFO] Writing per-cell features to: {csv_out}")
-    features_df.to_csv(csv_out, index=False)
+    _atomic_write_csv(features_df, csv_out)
 
     outlines = utils.outlines_list(mask_image)
     if make_qc:
@@ -200,8 +335,11 @@ def process_image_file(
         output_root, 
         num_workers, 
         tag: str = "",
-        save_extracted: bool = True,):
-    
+        save_extracted: bool = True,
+        *,
+        skip_if_complete: bool = True,
+        code_version: str = CODE_VERSION,
+    ):
     case_name = os.path.splitext(os.path.basename(file_path))[0]
     print(f"[INFO] ➤ Processing case: {case_name}")
 
@@ -211,38 +349,57 @@ def process_image_file(
     tiff_output_dir = os.path.join(output_folder, nd2_base)
     os.makedirs(tiff_output_dir, exist_ok=True)
 
+    # Fast skip if complete for this code_version
+    if skip_if_complete and _outputs_complete(tiff_output_dir) and _read_done_version(tiff_output_dir) == code_version:
+        cached = _load_cached_metrics(tiff_output_dir)
+        if cached:
+            return cached
+        # Fallback approximation (older runs without cache file)
+        csv_p = Path(tiff_output_dir) / "per_cell_features.csv"
+        approx = _approximate_metrics_from_csv(csv_p, tag, image_name=None)
+        return approx
 
-    # Load, collapse Z by max projection, save per-channel TIFFs
-    cyx, tiff_path, channel_names = read_any_to_cyx(
-        file_path,
-        tiff_output_dir,
-        z_mode="max",
-        t_index=0,
-        channel_map={"SD DAPI": "ICAM1", "SD GFP": "pTyr", "SD RFP": "Actin"},
-        desired_order=["ICAM1", "pTyr", "Actin"],  # optional, enforces this output order
-    )
+    # Acquire lock to avoid concurrent double work
+    lock = _lock_path(tiff_output_dir)
+    if not _acquire_lock(lock):
+        print(f"[INFO] Skipping {case_name}: locked by another process.")
+        cached = _load_cached_metrics(tiff_output_dir)
+        return cached
 
+    try:
+        # Load, collapse Z by max projection, save per-channel TIFFs
+        cyx, tiff_path, channel_names = read_any_to_cyx(
+            file_path,
+            tiff_output_dir,
+            z_mode="max",
+            t_index=0,
+            channel_map={"SD DAPI": "ICAM1", "SD GFP": "pTyr", "SD RFP": "Actin"},
+            desired_order=["ICAM1", "pTyr", "Actin"],
+        )
 
-    #tiff_path = convert_nd2_to_tiff(file_path, channel_names, tiff_output_dir)
-    #if tiff_path is None or not os.path.isfile(tiff_path):
-    #    raise FileNotFoundError(f"[ERROR] TIFF conversion failed or file not found: {tiff_path}")
+        tiff_image = cyx
+        results = process_tiff(
+            tiff_image,
+            tiff_path,
+            channel_names,    
+            output_folder,
+            num_workers,
+            tag,
+            save_extracted=save_extracted,
+        )
 
-    tiff_image = cyx #imread(tiff_path)
-    results = process_tiff(
-        tiff_image,
-        tiff_path,
-        channel_names,    
-        output_folder,
-        num_workers,
-        tag,
-        save_extracted=save_extracted,
-    )
+        # Cache per-case channel metrics + DONE.json
+        _save_cached_metrics(tiff_output_dir, results)
+        _write_done(tiff_output_dir, tag=tag, image=os.path.basename(tiff_path),
+                    channels=channel_names, code_version=code_version)
 
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-    return results
+        return results
+    finally:
+        _release_lock(lock)
 
 
 def process_folder(
@@ -252,10 +409,15 @@ def process_folder(
         num_workers, 
         progress_callback=None, 
         tag: str = "",
-        save_extracted: bool = True, ):
+        save_extracted: bool = True,
+        *,
+        skip_if_complete: bool = True,
+        code_version: str = CODE_VERSION,
+    ):
 
-    all_results = []
-    tasks = []
+    all_results: list[dict] = []
+    tasks: list[tuple] = []
+    to_run: list[tuple] = []
 
     for dirpath, _, filenames in os.walk(input_root):
         nd2_files = [f for f in filenames if f.lower().endswith(".nd2")]
@@ -267,10 +429,42 @@ def process_folder(
         print("[WARNING] No .nd2 files found in the input directory.")
         return []
 
-    print(f"[INFO] Found {len(tasks)} ND2 files to process.\n")
+    # Partition tasks into (skip/submit)
+    for (file_path, chs, in_root, out_root, n_workers, tg, save_ext) in tasks:
+        relative_folder = os.path.relpath(os.path.dirname(file_path), start=in_root)
+        tiff_output_dir = os.path.join(out_root, relative_folder, os.path.splitext(os.path.basename(file_path))[0])
 
-    with ProcessPoolExecutor(max_workers=min(num_workers, len(tasks))) as executor:
-        futures = {executor.submit(process_image_file, *args): args for args in tasks}
+        if skip_if_complete and _outputs_complete(tiff_output_dir) and _read_done_version(tiff_output_dir) == code_version:
+            cached = _load_cached_metrics(tiff_output_dir)
+            if cached:
+                all_results.extend(cached)
+                continue
+            # fallback approx if cache missing
+            csv_p = Path(tiff_output_dir) / "per_cell_features.csv"
+            approx = _approximate_metrics_from_csv(csv_p, tg, image_name=os.path.basename(file_path).replace(".nd2", ".tiff"))
+            all_results.extend(approx)
+            continue
+
+        to_run.append((file_path, chs, in_root, out_root, n_workers, tg, save_ext))
+
+    print(f"[INFO] Found {len(tasks)} ND2 files total; {len(to_run)} to process, {len(tasks)-len(to_run)} already complete.\n")
+
+    if not to_run:
+        return all_results  # everything was already complete
+
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from tqdm import tqdm
+
+    with ProcessPoolExecutor(max_workers=min(num_workers, len(to_run))) as executor:
+        futures = {
+            executor.submit(
+                process_image_file,
+                file_path, chs, in_root, out_root, n_workers, tg, save_ext,
+                skip_if_complete=skip_if_complete,
+                code_version=code_version,
+            ): (file_path, chs)
+            for (file_path, chs, in_root, out_root, n_workers, tg, save_ext) in to_run
+        }
         with tqdm(total=len(futures), desc="Processing ND2 files") as pbar:
             for future in as_completed(futures):
                 try:
@@ -296,7 +490,11 @@ def run_analysis(
         num_workers=4, 
         progress_callback=None, 
         tag: str = "",
-        save_extracted: bool = True, ):
+        save_extracted: bool = True,
+        *,
+        skip_if_complete: bool = True,
+        code_version: str = CODE_VERSION,
+    ):
 
     input_root = str(Path(input_folder))
     output_root = str(Path(output_folder))
@@ -305,6 +503,7 @@ def run_analysis(
         "channels": channel_names,
         "num_workers": num_workers,
         "save_extracted": save_extracted,
+        "code_version": code_version,
     }, indent=2))
 
     if not os.path.exists(input_root):
@@ -324,10 +523,15 @@ def run_analysis(
         progress_callback, 
         tag,
         save_extracted=save_extracted,
-        )
-
+        skip_if_complete=skip_if_complete,
+        code_version=code_version,
+    )
 
     df = pd.DataFrame(results)
-    summary_path = os.path.join(output_root, "global_metrics_summary.csv")
-    df.to_csv(summary_path, index=False)
-    print(f"[INFO] Summary saved to {summary_path}")
+    if not len(df):
+        print("[INFO] No results to summarize.")
+    else:
+        summary_path = os.path.join(output_root, "global_metrics_summary.csv")
+        _atomic_write_csv(df, summary_path)
+        print(f"[INFO] Summary saved to {summary_path}")
+

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 import os
+import pandas as pd
 
 from magicgui import magicgui
 from magicgui.widgets import Container, PushButton, FileEdit, Label
@@ -24,6 +25,34 @@ class RowState:
     conditions_by_subfolder: Dict[str, str] = field(default_factory=dict)
     conditions_for_path: str = ""
 
+def _scan_done_tags(out_dir: Path) -> Dict[str, Path]:
+    """
+    Return {tag -> case_dir} for cases that look complete on disk.
+    A case is 'complete' iff there is a per_cell_features.csv whose
+    'tag' matches and a sibling Actin_mask.tiff exists.
+    """
+    done: Dict[str, Path] = {}
+    try:
+        for csv_path in out_dir.rglob("per_cell_features.csv"):
+            case_dir = csv_path.parent
+            mask_path = case_dir / "Actin_mask.tiff"
+            if not mask_path.exists():
+                continue  # partial/incomplete, ignore
+
+            try:
+                df = pd.read_csv(csv_path, nrows=1)
+            except Exception:
+                continue
+
+            if len(df) == 0 or "tag" not in df.columns:
+                continue
+
+            tag = str(df["tag"].iloc[0])
+            # Last-writer-wins if duplicates; typically you won’t have tag collisions.
+            done[tag] = case_dir
+    except Exception:
+        pass
+    return done
 
 def _iter_immediate_subfolders(base: Path) -> List[Path]:
     if not base or not base.exists() or not base.is_dir():
@@ -266,13 +295,25 @@ def tcell_widget():
             viewer.status = "ℹ️ Segmentation cancelled."
             return
 
+        done_index = _scan_done_tags(out_dir)
+        chosen_to_run = [(p, tag) for (p, tag) in chosen if tag not in done_index]
+
+        if not chosen_to_run:
+            viewer.status = "ℹ️ All selected cases already have outputs on disk. Nothing to do."
+            return
+
         chan_list = [c.strip() for c in form.channel_names.value.split(",") if c.strip()]
         n_workers = int(form.num_workers.value)
 
         @thread_worker
         def _worker():
-            pbar = progress(desc="Segmentation (pilot)", total=len(chosen))
-            for i, (p, tag) in enumerate(chosen, start=1):
+            pbar = progress(desc="Segmentation (pilot)", total=len(chosen_to_run))
+            for i, (p, tag) in enumerate(chosen_to_run, start=1):
+                # Double-check just in case something finished while we queued:
+                if tag in _scan_done_tags(out_dir):
+                    pbar.n = i; pbar.refresh()
+                    continue
+
                 run_analysis(
                     str(p),
                     str(out_dir),
@@ -283,7 +324,8 @@ def tcell_widget():
                     save_extracted=bool(form.save_extracted.value),
                 )
                 pbar.n = i; pbar.refresh()
-            return str(out_dir), chosen
+            return str(out_dir), chosen_to_run
+
 
         def _done(res):
             out_path, selected_cases = res
@@ -328,13 +370,25 @@ def tcell_widget():
             viewer.status = "⚠️ No inputs configured."
             return
 
+        done_index = _scan_done_tags(out_dir)
+        to_run = [(p, tag) for (p, tag) in all_cases if tag not in done_index]
+
+        if not to_run:
+            viewer.status = "ℹ️ Everything already processed. Nothing to run."
+            return
+
         chan_list = [c.strip() for c in form.channel_names.value.split(",") if c.strip()]
         n_workers = int(form.num_workers.value)
 
         @thread_worker
         def _worker():
-            pbar = progress(desc="Full Analysis", total=len(all_cases))
-            for i, (p, tag) in enumerate(all_cases, start=1):
+            pbar = progress(desc="Full Analysis", total=len(to_run))
+            for i, (p, tag) in enumerate(to_run, start=1):
+                # Double-check in-loop (handles parallel instances / race):
+                if tag in _scan_done_tags(out_dir):
+                    pbar.n = i; pbar.refresh()
+                    continue
+
                 run_analysis(
                     str(p),
                     str(out_dir),
@@ -345,7 +399,8 @@ def tcell_widget():
                     save_extracted=bool(form.save_extracted.value),
                 )
                 pbar.n = i; pbar.refresh()
-            return str(out_dir), all_cases
+            return str(out_dir), to_run
+
 
         def _done(res):
             out_path, tasks_with_tags = res
