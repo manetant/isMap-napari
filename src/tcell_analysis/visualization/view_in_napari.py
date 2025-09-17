@@ -334,14 +334,11 @@ def show_analysis_results(
                     "equivalent_diameter": (float(dmin), float(dmax)),
                 })
 
-        try:
-            for dw in list(getattr(viewer.window, "dock_widgets", [])):
-                nm = getattr(dw, "name", None) or getattr(dw, "windowTitle", lambda: None)()
-                if nm == "Filter Cells":
-                    viewer.window.remove_dock_widget(dw)
-        except Exception:
-            pass
+        _remove_dock("Filter Cells")
         viewer.window.add_dock_widget(filter_points.native, area="right", name="Filter Cells")
+
+    else:
+        _remove_dock("Filter Cells")   # ← ensure it disappears when not requested
 
     # ---------- boxplot (tags from CSV) ----------
     if show_boxplot:
@@ -413,9 +410,15 @@ def show_analysis_results(
 
         viewer.window.add_dock_widget(panel, area="right", name="Intensity Boxplot")
         viewer.window.add_dock_widget(boxplot_controls, area="right", name="Boxplot Controls")
+    
+    else:
+        _remove_dock("Intensity Boxplot") 
+        _remove_dock("Boxplot Controls")
 
     # ---------- export UI ----------
     if export_csv:
+        _remove_dock("Export Filtered Points")
+
         default_export_path = Path(output_folder) / "filtered_points_export.csv"
         default_export_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -451,3 +454,6 @@ def show_analysis_results(
         export_button.changed.connect(_do_export)
         export_widget = Container(widgets=[save_path_picker, export_button])
         viewer.window.add_dock_widget(export_widget, area="right", name="Export Filtered Points")
+
+    else:
+        _remove_dock("Export Filtered Points")
