@@ -24,6 +24,7 @@ def show_analysis_results(
     on_filter_change=None, 
     show_filter: bool = True,
     show_boxplot: bool = True,
+    export_csv: bool = True,
 ):
     if initial_ranges is None:
         initial_ranges = {}
@@ -378,38 +379,39 @@ def show_analysis_results(
         viewer.window.add_dock_widget(boxplot_controls, area="right", name="Boxplot Controls")
 
     # ---------- export UI ----------
-    default_export_path = Path(output_folder) / "filtered_points_export.csv"
-    default_export_path.parent.mkdir(parents=True, exist_ok=True)
+    if export_csv:
+        default_export_path = Path(output_folder) / "filtered_points_export.csv"
+        default_export_path.parent.mkdir(parents=True, exist_ok=True)
 
-    save_path_picker = FileEdit(label="Save CSV", mode="w", value=str(default_export_path))
-    export_button = PushButton(label="Export CSV")
+        save_path_picker = FileEdit(label="Save CSV", mode="w", value=str(default_export_path))
+        export_button = PushButton(label="Export CSV")
 
-    def _do_export():
-        if points.data.shape[0] == 0:
-            print("[INFO] No points to export.")
-            return
+        def _do_export():
+            if points.data.shape[0] == 0:
+                print("[INFO] No points to export.")
+                return
 
-        out_path = str(save_path_picker.value)
-        if not out_path.endswith(".csv"):
-            out_path += ".csv"
+            out_path = str(save_path_picker.value)
+            if not out_path.endswith(".csv"):
+                out_path += ".csv"
 
-        filtered_coords = points.data
-        filtered_props  = points.properties
+            filtered_coords = points.data
+            filtered_props  = points.properties
 
-        data = {
-            "frame_index": filtered_coords[:, 0],
-            "y": filtered_coords[:, 1],
-            "x": filtered_coords[:, 2],
-        }
-        for prop_name, prop_vals in filtered_props.items():
-            data[prop_name] = prop_vals
+            data = {
+                "frame_index": filtered_coords[:, 0],
+                "y": filtered_coords[:, 1],
+                "x": filtered_coords[:, 2],
+            }
+            for prop_name, prop_vals in filtered_props.items():
+                data[prop_name] = prop_vals
 
-        data["frame_name"] = [names_valid[int(i)] for i in filtered_coords[:, 0]]
-        data["frame_tag"]  = [tags_valid[int(i)]  for i in filtered_coords[:, 0]]
+            data["frame_name"] = [names_valid[int(i)] for i in filtered_coords[:, 0]]
+            data["frame_tag"]  = [tags_valid[int(i)]  for i in filtered_coords[:, 0]]
 
-        pd.DataFrame(data).to_csv(out_path, index=False)
-        viewer.status = f"✅ Exported filtered points to: {out_path}"
+            pd.DataFrame(data).to_csv(out_path, index=False)
+            viewer.status = f"✅ Exported filtered points to: {out_path}"
 
-    export_button.changed.connect(_do_export)
-    export_widget = Container(widgets=[save_path_picker, export_button])
-    viewer.window.add_dock_widget(export_widget, area="right", name="Export Filtered Points")
+        export_button.changed.connect(_do_export)
+        export_widget = Container(widgets=[save_path_picker, export_button])
+        viewer.window.add_dock_widget(export_widget, area="right", name="Export Filtered Points")

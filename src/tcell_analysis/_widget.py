@@ -302,6 +302,7 @@ def tcell_widget():
                     on_filter_change=_on_filter_change,
                     show_filter=True,
                     show_boxplot=False,
+                    export_csv=False,
                 )
             except Exception as e:
                 viewer.status = f"⚠️ Visualization warning: {e}"
@@ -360,6 +361,7 @@ def tcell_widget():
                     on_filter_change=None,
                     show_filter=False,
                     show_boxplot=True,
+                    export_csv = True,
                 )
             except Exception as e:
                 viewer.status = f"⚠️ Visualization warning: {e}"
