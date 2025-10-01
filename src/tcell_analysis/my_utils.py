@@ -5,7 +5,7 @@ import tifffile as tiff
 from pathlib import Path
 from nd2reader import ND2Reader
 from typing import Dict, List, Optional, Tuple
-
+import time
 import logging
 
 logger = logging.getLogger(__name__)
@@ -63,25 +63,47 @@ def read_any_to_cyx(
     *,
     save_ome_tiff: bool = False,                  # write combined OME-TIFF with names
     compression: Optional[str] = "zlib",          # or None/"lzma"/"zstd"
+    scene_index: Optional[int] = None,
 ) -> Tuple[Optional[str], List[str]]:
     """
     Return (combined_tiff_path, final_channel_names).
     combined_tiff_path is the path to the multi-channel TIFF if written, else None.
     """
-    img = BioImage(file_path)
+    print(f"Reading {file_path} ...")
 
+    # 1) Quiet and speed up Bio-Formats startup
+    os.environ["SCIJAVA_LOG_LEVEL"] = "error"
+    os.environ["BIOFORMATS_LOG_LEVEL"] = "ERROR"
+    # avoid network checks for jar updates (can look like a hang)
+    os.environ["JGO_DISABLE_UPDATE"] = "1"
+
+    try:
+        img = BioImage(file_path)
+        # get channel names from img
+        detected = img.channel_names
+    except Exception as e:
+        logger.error(f"Error reading image data from {file_path}: {e}")
+        raise
     # Validate t_index
     try:
-        xr = img.xarray_data  # dims ("T","C","Z","Y","X") usually
+        xr = img.xarray_data
         nT = xr.sizes.get("T", 1)
+        nS = xr.sizes.get("S", 1)
     except Exception:
         xr = None
         nT = 1
+        nS = 1
+
     if not (0 <= t_index < nT):
         raise IndexError(f"t_index={t_index} out of range for T={nT}")
+    if scene_index is not None and not (0 <= scene_index < nS):
+        raise IndexError(f"scene_index={scene_index} out of range for S={nS}")
 
-    # Load CZYX for single timepoint
-    czyx = img.get_image_data("CZYX", T=t_index)  # (C, Z, Y, X)
+    # Pull a single scene → CZYX
+    if scene_index is None:
+        czyx = img.get_image_data("CZYX", T=t_index)           # default scene 0
+    else:
+        czyx = img.get_image_data("CZYX", T=t_index, S=scene_index)
 
     # Detect channel labels
     detected: Optional[List[str]] = None

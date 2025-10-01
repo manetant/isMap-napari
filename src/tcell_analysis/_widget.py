@@ -11,11 +11,117 @@ from magicgui.widgets import Container, PushButton, FileEdit, Label
 from napari.qt.threading import thread_worker
 from napari.utils import progress
 from napari import current_viewer
-from qtpy.QtWidgets import QInputDialog, QApplication, QDialog, QListWidget, QListWidgetItem, QVBoxLayout, QPushButton, QDialogButtonBox
+from qtpy.QtWidgets import (
+    QInputDialog, QApplication, QDialog, QListWidget, QListWidgetItem, QVBoxLayout,
+    QPushButton, QTableWidget, QTableWidgetItem, QCheckBox, QLineEdit, QRadioButton,
+    QDialogButtonBox, QWidget, QHBoxLayout, QButtonGroup
+)
+from bioio import BioImage
+import tifffile as tiff
 from qtpy.QtCore import Qt 
 
 from .analysis import run_analysis
 from .visualization.view_in_napari import show_analysis_results
+
+
+
+def _find_sample_image(base: Path) -> Path | None:
+    # search inside base for a single image we can open to detect channels
+    exts = (".vsi", ".nd2", ".czi", ".lif", ".tif", ".tiff")
+    for ext in exts:
+        hits = list(base.rglob(f"*{ext}"))
+        if hits:
+            return hits[0]
+    return None
+
+def _choose_channels_and_seg(parent, file_path: Path, prefer_name: str = "Actin"):
+    """
+    Pop a table listing detected channels:
+      (selected_names_ordered, channel_map_orig_to_new, segmentation_name) 
+    or (None, None, None) if cancelled.
+    """
+    # detect channels with BioImage
+    img = BioImage(str(file_path))
+    detected = list(getattr(img, "channel_names", []) or [])
+    if not detected:
+        # fallback to OME-XML or generic C0.. if needed
+        with tiff.TiffFile(str(file_path)) as tf:
+            chs = tf.pages[0].tags.get("ImageDescription", None)
+        # just make something reasonable if none
+        detected = [f"C{i}" for i in range(int(img.shape["C"]))]
+
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Select & Rename Channels, Pick Segmentation Channel")
+    lay = QVBoxLayout(dlg)
+
+    table = QTableWidget(dlg)
+    table.setColumnCount(4)
+    table.setHorizontalHeaderLabels(["Keep", "Original", "Rename to", "Segment?"])
+    table.setRowCount(len(detected))
+
+    seg_group = QButtonGroup(table)
+    seg_group.setExclusive(True)
+
+    # defaults
+    # keep all; rename = detected; segment = prefer_name if present else last
+    default_seg_idx = next((i for i, nm in enumerate(detected) if nm.lower() == prefer_name.lower()), len(detected)-1)
+
+    for r, orig in enumerate(detected):
+        # Keep checkbox
+        keep = QCheckBox()
+        keep.setChecked(True)
+        table.setCellWidget(r, 0, keep)
+
+        # Original (read-only)
+        it = QTableWidgetItem(orig)
+        it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+        table.setItem(r, 1, it)
+
+        # Rename to
+        name_edit = QLineEdit(orig)
+        table.setCellWidget(r, 2, name_edit)
+
+        # Segment radio
+        rb = QRadioButton()
+        rb.setChecked(r == default_seg_idx)
+        seg_group.addButton(rb, r)
+        table.setCellWidget(r, 3, rb)
+
+    table.resizeColumnsToContents()
+    lay.addWidget(table)
+
+    btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dlg)
+    lay.addWidget(btns)
+    btns.accepted.connect(dlg.accept)
+    btns.rejected.connect(dlg.reject)
+
+    if dlg.exec_() != QDialog.Accepted:
+        return None, None, None
+
+    # collect
+    keep_rows = []
+    for r in range(table.rowCount()):
+        keep = table.cellWidget(r, 0).isChecked()
+        orig = table.item(r, 1).text()
+        new  = table.cellWidget(r, 2).text().strip() or orig
+        if keep:
+            keep_rows.append((orig, new, r))
+
+    if not keep_rows:
+        return None, None, None
+
+    seg_row = seg_group.checkedId()
+    seg_orig = detected[seg_row] if 0 <= seg_row < len(detected) else keep_rows[-1][0]
+    # If segmentation channel wasn’t kept, force it to the first kept row
+    if not any(orig == seg_orig for (orig, _, _) in keep_rows):
+        seg_orig = keep_rows[0][0]
+
+    selected_names = [new for (_, new, _) in keep_rows]
+    channel_map = {orig: new for (orig, new, _) in keep_rows}
+
+    # final segmentation name is the renamed one (if kept)
+    seg_new = channel_map.get(seg_orig, keep_rows[0][1])
+    return selected_names, channel_map, seg_new
 
 
 @dataclass
@@ -26,29 +132,23 @@ class RowState:
     conditions_for_path: str = ""
 
 def _scan_done_tags(out_dir: Path) -> Dict[str, Path]:
-    """
-    Return {tag -> case_dir} for cases that look complete on disk.
-    A case is 'complete' iff there is a per_cell_features.csv whose
-    'tag' matches and a sibling Actin_mask.tiff exists.
-    """
     done: Dict[str, Path] = {}
     try:
         for csv_path in out_dir.rglob("per_cell_features.csv"):
             case_dir = csv_path.parent
-            mask_path = case_dir / "Actin_mask.tiff"
+            mask_candidates = list(case_dir.glob("*_mask.tiff"))
+            if not mask_candidates:
+                continue
+            mask_path = mask_candidates[0]    # <-- FIX
             if not mask_path.exists():
-                continue  # partial/incomplete, ignore
-
+                continue
             try:
                 df = pd.read_csv(csv_path, nrows=1)
             except Exception:
                 continue
-
             if len(df) == 0 or "tag" not in df.columns:
                 continue
-
             tag = str(df["tag"].iloc[0])
-            # Last-writer-wins if duplicates; typically you won’t have tag collisions.
             done[tag] = case_dir
     except Exception:
         pass
@@ -122,20 +222,40 @@ def tcell_widget():
 
     # store filter thresholds picked during “Run Segmentation”
     filter_ranges: Dict[str, tuple] = {}
+    chosen_channel_names: List[str] = []
+    chosen_seg_channel: str | None = None
+    chosen_channel_map: Dict[str, str] = {}
+
+    def _ensure_channel_selection(base_path_for_sampling: Path, parent_window) -> bool:
+        nonlocal chosen_channel_names, chosen_seg_channel, chosen_channel_map
+
+        if chosen_channel_names and chosen_seg_channel:
+            return True
+
+        sample = _find_sample_image(base_path_for_sampling)
+        if sample is None:
+            return False
+
+        sel_names, ch_map, seg_new = _choose_channels_and_seg(parent_window, sample, prefer_name="Actin")
+        if not sel_names:
+            return False
+
+        chosen_channel_names = sel_names
+        chosen_seg_channel   = seg_new
+        chosen_channel_map   = ch_map
+        return True
 
     # ---------- BASE FORM ----------
     @magicgui(
         input_folder={"widget_type": "FileEdit", "mode": "d", "label": "Input Folder"},
         output_folder={"widget_type": "FileEdit", "mode": "d", "label": "Output Folder"},
-        channel_names={"widget_type": "LineEdit", "label": "Channels (comma-separated)", "value": "ICAM1,pTyr,Actin"},
-        num_workers={"widget_type": "SpinBox", "min": 1, "max": 32, "value": 4},
+        num_workers={"widget_type": "SpinBox", "min": 1, "max": 32, "value": 1},
         save_extracted={"widget_type": "CheckBox", "label": "Save extracted cell crops", "value": True},
         call_button=False,
     )
     def form(
         input_folder: Path,
         output_folder: Path,
-        channel_names: str,
         num_workers: int,
         save_extracted: bool,
     ):
@@ -221,7 +341,6 @@ def tcell_widget():
     ui.append(form.input_folder)
     ui.append(add_btn)
     ui.append(extra_box)
-    ui.append(form.channel_names)
     ui.append(form.num_workers)
     ui.append(form.save_extracted)
     ui.append(form.output_folder)
@@ -291,6 +410,21 @@ def tcell_widget():
 
         # let user choose which conditions to segment now
         chosen = _choose_conditions_dialog(viewer.window._qt_window, [(p, t) for p, t in all_cases])
+        
+        # Ask for channels once (use the first selected case as the sampler)
+        base_for_sampling = chosen[0][0] if chosen else None
+        if not base_for_sampling or not _ensure_channel_selection(base_for_sampling, viewer.window._qt_window):
+            viewer.status = "⚠️ Could not detect/select channels."
+            return
+
+        # Use the user-selected channels everywhere downstream
+        chan_list = chosen_channel_names[:]
+        seg_name  = chosen_seg_channel
+        ch_map    = chosen_channel_map
+
+        print(f"Using channels: {chan_list}, segmenting on: {seg_name}")
+        print(f"Channel rename map: {ch_map}")
+        
         if not chosen:
             viewer.status = "ℹ️ Segmentation cancelled."
             return
@@ -302,7 +436,6 @@ def tcell_widget():
             viewer.status = "ℹ️ All selected cases already have outputs on disk. Nothing to do."
             return
 
-        chan_list = [c.strip() for c in form.channel_names.value.split(",") if c.strip()]
         n_workers = int(form.num_workers.value)
 
         @thread_worker
@@ -322,6 +455,8 @@ def tcell_widget():
                     progress_callback=None,
                     tag=tag,
                     save_extracted=bool(form.save_extracted.value),
+                    seg_channel=chosen_seg_channel,
+                    channel_rename_map=chosen_channel_map,
                 )
                 pbar.n = i; pbar.refresh()
             return str(out_dir), chosen_to_run
@@ -345,6 +480,7 @@ def tcell_widget():
                     show_filter=True,
                     show_boxplot=False,
                     export_csv=False,
+                    show_radial_viewer=False,
                 )
             except Exception as e:
                 viewer.status = f"⚠️ Visualization warning: {e}"
@@ -370,25 +506,32 @@ def tcell_widget():
             viewer.status = "⚠️ No inputs configured."
             return
 
-        done_index = _scan_done_tags(out_dir)
-        to_run = [(p, tag) for (p, tag) in all_cases if tag not in done_index]
+        # IMPORTANT: do NOT filter by tag here. We want every case considered.
+        to_run = list(all_cases)  # ← include pilot cases too
+
+        # Ensure channels
+        base_for_sampling = to_run[0][0] if to_run else form.input_folder.value
+        if base_for_sampling and not _ensure_channel_selection(base_for_sampling, viewer.window._qt_window):
+            viewer.status = "⚠️ Could not detect/select channels."
+            return
+
+        chan_list = chosen_channel_names[:]
+        seg_name  = chosen_seg_channel
+        ch_map    = chosen_channel_map
 
         if not to_run:
             viewer.status = "ℹ️ Everything already processed. Nothing to run."
             return
 
-        chan_list = [c.strip() for c in form.channel_names.value.split(",") if c.strip()]
         n_workers = int(form.num_workers.value)
 
+        # carry the thresholds captured during pilot
+        fea_thresh = filter_ranges.copy()
+            
         @thread_worker
         def _worker():
             pbar = progress(desc="Full Analysis", total=len(to_run))
             for i, (p, tag) in enumerate(to_run, start=1):
-                # Double-check in-loop (handles parallel instances / race):
-                if tag in _scan_done_tags(out_dir):
-                    pbar.n = i; pbar.refresh()
-                    continue
-
                 run_analysis(
                     str(p),
                     str(out_dir),
@@ -397,26 +540,28 @@ def tcell_widget():
                     progress_callback=None,
                     tag=tag,
                     save_extracted=bool(form.save_extracted.value),
+                    seg_channel=seg_name,
+                    channel_rename_map=ch_map,
+                    feature_thresholds=fea_thresh,   # ← thresholds applied here
                 )
                 pbar.n = i; pbar.refresh()
             return str(out_dir), to_run
 
-
         def _done(res):
             out_path, tasks_with_tags = res
             viewer.status = "✅ Analysis completed."
-            # seed viewer with the thresholds user picked during the pilot
             try:
                 show_analysis_results(
                     viewer,
                     out_path,
                     chan_list,
                     tasks_with_tags,
-                    initial_ranges=filter_ranges.copy(),
+                    initial_ranges=fea_thresh,
                     on_filter_change=None,
                     show_filter=False,
                     show_boxplot=True,
-                    export_csv = True,
+                    export_csv=True,
+                    show_radial_viewer=True,
                 )
             except Exception as e:
                 viewer.status = f"⚠️ Visualization warning: {e}"

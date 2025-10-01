@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from tifffile import imread
+from tifffile import imread as _tiffread
 import dask.array as da
 from dask import delayed
 from magicgui import magicgui
@@ -26,6 +27,7 @@ def show_analysis_results(
     show_filter: bool = True,
     show_boxplot: bool = True,
     export_csv: bool = True,
+    show_radial_viewer: bool = True,
 ):
     if initial_ranges is None:
         initial_ranges = {}
@@ -87,14 +89,13 @@ def show_analysis_results(
         return clims
 
     def find_image_path(frame_dir: Path) -> Path:
-        """Prefer <frame_name>.tiff, otherwise first non-mask *.tif* in frame_dir."""
         name = frame_dir.name
         p = frame_dir / f"{name}.tiff"
         if p.exists():
             return p
         cands = [
             q for q in frame_dir.glob("*.tif*")
-            if q.name.lower() != "actin_mask.tiff" and "mask" not in q.name.lower()
+            if not q.name.lower().endswith("_mask.tiff") and "mask" not in q.name.lower()
         ]
         if not cands:
             raise FileNotFoundError(f"No multi-channel TIFF in {frame_dir}")
@@ -120,11 +121,17 @@ def show_analysis_results(
         )
 
     def load_mask_and_df(fd: Path):
-        """Load mask + per_cell_features.csv and return (mask, df_with_index, tag)."""
-        mask_path = fd / "Actin_mask.tiff"
-        csv_path  = fd / "per_cell_features.csv"
-        if not mask_path.exists():
-            raise FileNotFoundError(mask_path)
+        """
+        Load mask + per_cell_features.csv and return (mask, df_with_index, tag, seg_name).
+        seg_name is inferred from "<SEG>_mask.tiff" inside fd.
+        """
+        # find any "*_mask.tiff" in the frame directory
+        mask_candidates = sorted([p for p in fd.glob("*_mask.tiff")])
+        if not mask_candidates:
+            raise FileNotFoundError(fd / "*_mask.tiff")
+        mask_path = mask_candidates[0]
+
+        csv_path = fd / "per_cell_features.csv"
         if not csv_path.exists():
             raise FileNotFoundError(csv_path)
 
@@ -138,32 +145,40 @@ def show_analysis_results(
 
         tag = str(df["tag"].iloc[0]) if "tag" in df.columns and len(df) else "N/A"
         df = df.set_index("label")
-        return mask, df, tag
+
+        # infer segmentation channel from file name "<SEG>_mask.tiff"
+        seg_name = mask_path.name[:-len("_mask.tiff")] if mask_path.name.lower().endswith("_mask.tiff") else "N/A"
+        return mask, df, tag, seg_name
+
+
 
     # ---------- discover frames ----------
+    # discover frames by masks
     root = Path(output_folder)
-    mask_hits = sorted(root.rglob("Actin_mask.tiff"))
+    mask_hits = sorted(root.rglob("*_mask.tiff"))
     if not mask_hits:
-        raise ValueError(f"No Actin_mask.tiff under {root}")
+        raise ValueError(f"No *_mask.tiff under {root}")
 
     frame_dirs = sorted({p.parent for p in mask_hits})
 
     # Load lightweight things eagerly (mask/CSV/tag) and collect image paths
-    image_paths, masks, dfs, frame_tags = [], [], [], []
+    image_paths, masks, dfs, frame_tags, seg_names = [], [], [], [], []
     for fd in frame_dirs:
         try:
-            mask, df, tag = load_mask_and_df(fd)
+            mask, df, tag, seg_name = load_mask_and_df(fd)
         except (FileNotFoundError, ValueError) as e:
             print(f"[WARN] Skipping {fd}: {e}")
             continue
         masks.append(mask)
         dfs.append(df)
         frame_tags.append(tag)
+        seg_names.append(seg_name)
         try:
             image_paths.append(find_image_path(fd))
         except FileNotFoundError as e:
             print(f"[WARN] Skipping image for {fd}: {e}")
             image_paths.append(None)
+
 
     if len(dfs) == 0:
         raise ValueError("Found frames, but none had both mask and per_cell_features.csv.")
@@ -227,9 +242,11 @@ def show_analysis_results(
 
     # ---------- points/properties/text (vectorized) ----------
     # Align dfs and tags to valid_idxs too
-    dfs_valid  = [dfs[i] for i in valid_idxs]
-    tags_valid = [frame_tags[i] for i in valid_idxs]
-    names_valid = [frame_dirs[i].name for i in valid_idxs]
+    dfs_valid       = [dfs[i] for i in valid_idxs]
+    tags_valid      = [frame_tags[i] for i in valid_idxs]
+    names_valid     = [frame_dirs[i].name for i in valid_idxs]
+    seg_names_valid = [seg_names[i] for i in valid_idxs]
+
 
     # union of columns across frames
     all_columns = sorted(set().union(*[set(df.columns) for df in dfs_valid]))
@@ -291,10 +308,87 @@ def show_analysis_results(
             idx = 0
         idx = max(0, min(idx, len(names_valid) - 1))
         n_cells = int((mask_stack[idx] > 0).sum())
-        viewer.text_overlay.text = f"Frame: {names_valid[idx]} | Group: {tags_valid[idx]} | Cells: {n_cells}"
+        seg_name = seg_names_valid[idx] if idx < len(seg_names_valid) else "N/A"
+        viewer.text_overlay.text = (
+            f"Frame: {names_valid[idx]} | Group: {tags_valid[idx]} | Cells: {n_cells} | Seg: {seg_name}"
+        )
 
     viewer.dims.events.current_step.connect(_update_overlay)
     _update_overlay()
+
+    # ---------- Radial Condition Viewer (optional) ----------
+    if show_radial_viewer:
+        # find available radial channels by scanning the cond dir of each condition
+        cond_dirs = {}
+        root_path = Path(output_folder)
+        for tag in sorted(set(tags_valid)):
+            top = root_path / f"res_{tag}"
+            if top.exists():
+                cond_dirs[tag] = top
+            else:
+                hits = list(root_path.rglob(f"res_{tag}"))
+                cond_dirs[tag] = hits[0] if hits else top
+
+        # build channel list: start with ALL image channels
+        radial_channels = list(ch_names)
+
+        # plus any extras found on disk
+        for tag, cdir in cond_dirs.items():
+            if not cdir.exists():
+                continue
+            for p in sorted(cdir.glob("*_radTotAv.tif")):
+                ch = p.name.replace("_radTotAv.tif", "")
+                if ch not in radial_channels:
+                    radial_channels.append(ch)
+
+        def _upsert_image(name, data):
+            try:
+                layer = viewer.layers[name]
+                layer.data = data
+                layer.metadata["tcell_analysis_layers"] = True
+                return layer
+            except KeyError:
+                return viewer.add_image(
+                    data, name=name,
+                    metadata={"tcell_analysis_layers": True},
+                    colormap="gray"
+                )
+
+        @magicgui(
+            auto_call=True,
+            channel={"choices": radial_channels or ["(none)"], "label": "Channel"},
+            kind={"choices": ["Total Average", "Montage", "Stack"], "label": "Show"},
+            tag={"choices": sorted(set(tags_valid)), "label": "Condition"},
+        )
+        def radial_controls(
+            channel: str = radial_channels[0] if radial_channels else "(none)",
+            kind: str = "Total Average",
+            tag: str = sorted(set(tags_valid))[0] if tags_valid else "N/A",
+        ):
+            if channel == "(none)":
+                return
+            cdir = cond_dirs.get(tag, None)
+            if not cdir or not cdir.exists():
+                return
+            if kind == "Total Average":
+                path = cdir / f"{channel}_radTotAv.tif"
+                nm = f"Radial TotAvg – {channel} – {tag}"
+            elif kind == "Montage":
+                path = cdir / f"{channel}_radMontage.tif"
+                nm = f"Radial Montage – {channel} – {tag}"
+            else:
+                path = cdir / f"{channel}_radStack.tif"
+                nm = f"Radial Stack – {channel} – {tag}"
+            if not path.exists():
+                viewer.status = f"⚠️ Missing: {path.name}"
+                return
+            arr = _tiffread(str(path))
+            _upsert_image(nm, arr)
+
+        _remove_dock("Radial Condition Viewer")   # ensure no duplicate
+        viewer.window.add_dock_widget(radial_controls, area="right", name="Radial Condition Viewer")
+    else:
+        _remove_dock("Radial Condition Viewer")   # hide during segmentation/pilot
 
     # ---------- filtering widget (range sliders are nicer, but keep your sliders) ----------
     # defaults if not provided
@@ -352,12 +446,15 @@ def show_analysis_results(
         _panel_layout.setContentsMargins(6, 6, 6, 6)
         _panel_layout.addWidget(canvas)
 
+        # choose default metric using the detected seg name of the first valid frame
         mean_intensity_metrics = [k for k in all_properties if k.endswith("_mean_intensity")]
-        default_metric = (
-            "Actin_mean_intensity"
-            if "Actin_mean_intensity" in mean_intensity_metrics
-            else (mean_intensity_metrics[0] if mean_intensity_metrics else None)
-        )
+        default_metric = None
+        if mean_intensity_metrics:
+            if seg_names_valid and seg_names_valid[0]:
+                cand = f"{seg_names_valid[0]}_mean_intensity"
+                default_metric = cand if cand in mean_intensity_metrics else None
+            if default_metric is None:
+                default_metric = mean_intensity_metrics[0]
 
         def _plot_box(metric: str | None):
             ax.clear()

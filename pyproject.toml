@@ -49,7 +49,7 @@ dependencies = [
     "bioio>=3.0.0",
     "bioio-nd2>=1.3.0",
     "napari-bioio-reader>=0.2.0"
-"
+    "bioio-bioformats"
 ]
 
 [project.optional-dependencies]
