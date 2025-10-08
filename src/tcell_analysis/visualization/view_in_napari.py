@@ -10,7 +10,8 @@ from magicgui import magicgui
 from magicgui.widgets import Container, FileEdit, PushButton
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from qtpy.QtWidgets import QWidget, QVBoxLayout
+from qtpy.QtWidgets import QWidget, QVBoxLayout, QTabWidget, QHBoxLayout, QLabel
+
 import re
 
 def show_analysis_results(
@@ -34,6 +35,23 @@ def show_analysis_results(
 
     # Tag we place on all layers we add so we can clean them up later
     PLUGIN_TAG = "tcell_analysis_layers"
+    radial_controls = None
+    radial_line_profiles = None
+    panel_lp = None          # matplotlib canvas panel for radial profiles
+    boxplot_controls = None
+    panel = None             # matplotlib canvas panel for boxplot
+
+
+    # keep strong refs for dock widgets / magicgui objects
+    def _keep_refs(*objs):
+        try:
+            bucket = getattr(viewer, "_tcell_refs", None)
+            if bucket is None:
+                bucket = []
+                setattr(viewer, "_tcell_refs", bucket)
+            bucket.extend(objs)
+        except Exception:
+            pass
 
     def _base(nm: str) -> str:
         # strip napari's auto-suffix like "ICAM1 [1]"
@@ -385,8 +403,108 @@ def show_analysis_results(
             arr = _tiffread(str(path))
             _upsert_image(nm, arr)
 
-        _remove_dock("Radial Condition Viewer")   # ensure no duplicate
-        viewer.window.add_dock_widget(radial_controls, area="right", name="Radial Condition Viewer")
+        #_remove_dock("Radial Condition Viewer")
+        #dock_rcv = viewer.window.add_dock_widget(radial_controls, area="right", name="Radial Condition Viewer")
+        #_keep_refs(radial_controls, dock_rcv)
+        
+        try:
+            # ==== Radial Line Profiles (MFI normalized along a diagonal) ====
+            # Uses cond_dirs, radial_channels, tags_valid defined above.
+            def _diagonal_profile(img2d: np.ndarray, diagonal: str = "main") -> np.ndarray:
+                """
+                Return 1D MFI along a single diagonal of img2d, normalized by its max.
+                - diagonal="main" -> top-left to bottom-right
+                - diagonal="anti" -> top-right to bottom-left
+                Crops to a centered square first if the image is not square.
+                """
+                if img2d.ndim != 2:
+                    raise ValueError("radTotAv image must be 2D")
+
+                # choose which diagonal
+                if diagonal == "anti":
+                    img2d = np.fliplr(img2d)
+
+                # crop to centered square so np.diag samples a full-length diagonal
+                H, W = img2d.shape
+                n = min(H, W)
+                y0 = (H - n) // 2
+                x0 = (W - n) // 2
+                sub = img2d[y0:y0 + n, x0:x0 + n]
+
+                # take diagonal and normalize to its own max
+                prof = np.diag(sub).astype(np.float64, copy=False)
+                m = np.nanmax(prof) if prof.size else 0.0
+                return (prof / m) if m > 0 else prof
+
+            fig_lp, ax_lp = plt.subplots()
+            canvas_lp = FigureCanvas(fig_lp)
+
+            # Multi-select if available; fall back to single-select.
+            try:
+                channels_widget = {"widget_type": "Select", "choices": radial_channels, "multiselect": True, "label": "Channels"}
+            except Exception:
+                channels_widget = {"choices": radial_channels, "label": "Channel"}
+
+            # --- replace the magicgui function body with this ---
+            @magicgui(
+                auto_call=True,
+                tag={"choices": sorted(set(tags_valid)), "label": "Condition"},
+                channel={"choices": radial_channels, "label": "Channel"}
+            )
+            def radial_line_profiles(tag: str = sorted(set(tags_valid))[0] if tags_valid else "N/A",
+                                    channel: str = radial_channels[0] if radial_channels else ""):
+                ax_lp.clear()
+                try:
+                    if not channel:
+                        ax_lp.set_title("Pick a channel"); canvas_lp.draw_idle(); return
+
+                    cdir = cond_dirs.get(tag, None)
+                    if not cdir or not cdir.exists():
+                        ax_lp.set_title(f"No res dir for tag: {tag}"); canvas_lp.draw_idle(); return
+
+                    path = cdir / f"{channel}_radTotAv.tif"
+                    if not path.exists():
+                        ax_lp.set_title(f"Missing: {path.name}"); canvas_lp.draw_idle(); return
+
+                    arr = _tiffread(str(path))
+
+                    # single diagonal, already normalized:
+                    prof = _diagonal_profile(arr, diagonal="main")   # or "anti" based on your UI
+
+                    # Plot directly over [-1, 1] across the *existing* diagonal
+                    n = len(prof)
+                    x = np.linspace(-1.0, 1.0, n, dtype=float)
+                    y = prof
+
+                    ax_lp.plot(x, y, label=str(channel))
+                    ax_lp.set_xlim(-1.0, 1.0)
+                    ax_lp.set_ylim(0.0, 1.1)
+                    ax_lp.set_xlabel("Distance from center (A.U.)")
+                    ax_lp.set_ylabel("MFI (normalized)")
+                    ax_lp.legend(loc="upper center", ncol=2, fontsize=8)
+                    ax_lp.set_title(f"Diagonal MFI – {tag} – {channel}")
+
+                except Exception as e:
+                    ax_lp.set_title(f"Error: {e}")
+                finally:
+                    fig_lp.tight_layout()
+                    canvas_lp.draw_idle()
+
+            # Put the plot in its own dock under the controls
+            panel_lp = QWidget()
+            lay_lp = QVBoxLayout(panel_lp); lay_lp.setContentsMargins(6, 6, 6, 6)
+            lay_lp.addWidget(canvas_lp)
+
+            #_remove_dock("Radial Line Controls")
+            #_remove_dock("Radial Line Profiles")
+            #dock_rlc = viewer.window.add_dock_widget(radial_line_profiles, area="right", name="Radial Line Controls")
+            #dock_rlp = viewer.window.add_dock_widget(panel_lp, area="right", name="Radial Line Profiles")
+            #_keep_refs(radial_line_profiles, panel_lp, fig_lp, ax_lp, canvas_lp, dock_rlc, dock_rlp)
+
+        except Exception as e:
+            # Don't break the rest of the UI if this feature can't initialize
+            viewer.status = f"⚠️ Radial Line Profiles disabled: {e}"
+    
     else:
         _remove_dock("Radial Condition Viewer")   # hide during segmentation/pilot
 
@@ -505,14 +623,68 @@ def show_analysis_results(
         points.events.data.connect(_on_points_changed)
         _plot_box(default_metric)
 
-        viewer.window.add_dock_widget(panel, area="right", name="Intensity Boxplot")
-        viewer.window.add_dock_widget(boxplot_controls, area="right", name="Boxplot Controls")
+        #_remove_dock("Intensity Boxplot")
+        #_remove_dock("Boxplot Controls")
+        #dock_bp = viewer.window.add_dock_widget(panel, area="right", name="Intensity Boxplot")
+        #dock_bpc = viewer.window.add_dock_widget(boxplot_controls, area="right", name="Boxplot Controls")
+        #_keep_refs(panel, canvas, fig, ax, boxplot_controls, dock_bp, dock_bpc)
     
     else:
         _remove_dock("Intensity Boxplot") 
         _remove_dock("Boxplot Controls")
 
     # ---------- export UI ----------
+    # ---------- Analysis Plots (Tabbed) ----------
+    # Build one dock with tabs for: Radial Image, Radial Profiles, Boxplot
+    # We only add tabs for widgets that actually exist (based on flags).
+    for nm in [
+        "Radial Condition Viewer", "Radial Line Controls", "Radial Line Profiles",
+        "Intensity Boxplot", "Boxplot Controls", "Analysis Plots"
+    ]:
+        _remove_dock(nm)
+
+    plots_panel = QWidget()
+    plots_layout = QVBoxLayout(plots_panel)
+    plots_layout.setContentsMargins(6, 6, 6, 6)
+
+    tabs = QTabWidget(plots_panel)
+
+    # --- Tab 1: Radial Image controls ---
+    if radial_controls is not None:
+        tab_radimg = QWidget()
+        tab_radimg_layout = QVBoxLayout(tab_radimg)
+        tab_radimg_layout.setContentsMargins(6, 6, 6, 6)
+        tab_radimg_layout.addWidget(radial_controls.native)
+        info_lbl = QLabel("Load radial images (TotAvg / Montage / Stack) into napari layers.")
+        info_lbl.setWordWrap(True)
+        tab_radimg_layout.addWidget(info_lbl)
+        tabs.addTab(tab_radimg, "Radial Image")
+
+    # --- Tab 2: Radial Profiles (controls + canvas) ---
+    if (radial_line_profiles is not None) and (panel_lp is not None):
+        tab_profiles = QWidget()
+        tab_profiles_layout = QVBoxLayout(tab_profiles)
+        tab_profiles_layout.setContentsMargins(6, 6, 6, 6)
+        tab_profiles_layout.addWidget(radial_line_profiles.native)  # controls
+        tab_profiles_layout.addWidget(panel_lp)                     # figure canvas panel
+        tabs.addTab(tab_profiles, "Radial Profiles")
+
+    # --- Tab 3: Boxplot (controls + canvas) ---
+    if (boxplot_controls is not None) and (panel is not None):
+        tab_box = QWidget()
+        tab_box_layout = QVBoxLayout(tab_box)
+        tab_box_layout.setContentsMargins(6, 6, 6, 6)
+        tab_box_layout.addWidget(boxplot_controls.native)  # controls
+        tab_box_layout.addWidget(panel)                    # figure canvas panel
+        tabs.addTab(tab_box, "Boxplot")
+
+    # Only add the dock if at least one tab exists
+    if tabs.count() > 0:
+        plots_layout.addWidget(tabs)
+        viewer.window.add_dock_widget(plots_panel, area="right", name="Analysis Plots")
+        _keep_refs(plots_panel, tabs, radial_controls, radial_line_profiles, panel_lp, boxplot_controls, panel)
+
+
     if export_csv:
         _remove_dock("Export Filtered Points")
 

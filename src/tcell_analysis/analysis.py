@@ -384,7 +384,7 @@ def process_tiff(
             gpu=torch.cuda.is_available(),
             diameter=100,
             model_type="cyto3",
-            scale=0.2, # scale down the image to 25%
+            scale=0.4, # scale down the image to 25%
         )
 
     mask_image = masks[0]
@@ -458,7 +458,6 @@ def process_tiff(
     cond_dir = Path(output_dir) / f"res_{tag}"
     cond_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- remove any stale per-ROI radials for this frame BEFORE regenerating ---
     try:
         for d in proc_dir.iterdir():
             if d.is_dir() and d.name.startswith("RadAv_"):
@@ -494,7 +493,7 @@ def process_tiff(
                 roi2d = ensure_square(roi2d, AUTO_SQUARE)
                 rad = radial_average_ring(roi2d).astype(np.float32, copy=False)
                 tiff.imwrite(str(rad_dir / f"Cell_{int(lab):05d}_radAv.tif"),
-                             rad, photometric="minisblack", bigtiff=True)
+                             rad)
         except Exception as e:
             print(f"[WARN] Radial save failed in {rad_dir}: {e}")
 
@@ -766,9 +765,9 @@ def _aggregate_radials_for_condition(condition_root: Path, tag: str, channel: st
     stack = np.stack(normed, axis=0).astype(np.float32)
 
     cond_dir.mkdir(parents=True, exist_ok=True)
-    tiff.imwrite(str(cond_dir / f"{channel}_radStack.tif"), stack, photometric="minisblack", bigtiff=True)
-    tiff.imwrite(str(cond_dir / f"{channel}_radMontage.tif"), montage_from_stack(stack).astype(np.float32), photometric="minisblack")
-    tiff.imwrite(str(cond_dir / f"{channel}_radTotAv.tif"), stack.mean(axis=0).astype(np.float32), photometric="minisblack")
+    tiff.imwrite(str(cond_dir / f"{channel}_radStack.tif"), stack)
+    tiff.imwrite(str(cond_dir / f"{channel}_radMontage.tif"), montage_from_stack(stack).astype(np.float32))
+    tiff.imwrite(str(cond_dir / f"{channel}_radTotAv.tif"), stack.mean(axis=0).astype(np.float32))
     print(f"[INFO] Saved in {cond_dir.name}: {channel}_radStack.tif, {channel}_radMontage.tif, {channel}_radTotAv.tif")
 
 
@@ -827,6 +826,7 @@ def run_analysis(
         feature_thresholds=feature_thresholds, 
     )
 
+    '''
     df = pd.DataFrame(results)
     if not len(df):
         print("[INFO] No results to summarize.")
@@ -834,7 +834,7 @@ def run_analysis(
         summary_path = os.path.join(output_root, "global_metrics_summary.csv")
         _atomic_write_csv(df, summary_path)
         print(f"[INFO] Summary saved to {summary_path}")
-
+    '''
 
     # Aggregate radials for the chosen segmentation channel
     #radial_channels = [seg_channel] if seg_channel else ([channel_names[-1]] if channel_names else [])
