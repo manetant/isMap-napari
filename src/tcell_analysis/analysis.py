@@ -384,7 +384,7 @@ def process_tiff(
             gpu=torch.cuda.is_available(),
             diameter=100,
             model_type="cyto3",
-            scale=0.5, # scale down the image to 25%
+            scale=0.2, # scale down the image to 25%
         )
 
     mask_image = masks[0]

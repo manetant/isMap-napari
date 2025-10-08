@@ -18,7 +18,8 @@ from qtpy.QtWidgets import (
 )
 from bioio import BioImage
 import tifffile as tiff
-from qtpy.QtCore import Qt 
+from qtpy.QtCore import Qt, QObject, Signal
+from qtpy.QtWidgets import QProgressBar, QTextEdit, QGridLayout, QLabel
 
 from .analysis import run_analysis
 from .visualization.view_in_napari import show_analysis_results
@@ -214,6 +215,54 @@ def _choose_conditions_dialog(parent, pairs: List[Tuple[Path, str]]) -> List[Tup
     return out
 
 
+class _ProgressBridge(QObject):
+    # Thread-safe signals
+    total_changed = Signal(int, int)              # done, total
+    file_changed = Signal(int, int)               # done, total for current file
+    now_processing = Signal(str, str)             # path, tag
+    log_line = Signal(str)
+    finished = Signal()
+
+class ProgressPanel(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QGridLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        self.lblOverall = QLabel("Overall: 0 / 0")
+        self.pbOverall = QProgressBar()
+        self.pbOverall.setMinimum(0); self.pbOverall.setMaximum(100)
+        self.lblCurrent = QLabel("Current: –")
+        self.pbCurrent = QProgressBar()
+        self.pbCurrent.setMinimum(0); self.pbCurrent.setMaximum(100)
+        self.lblTag = QLabel("Tag: –")
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMinimumHeight(160)
+        lay.addWidget(self.lblOverall, 0, 0, 1, 2)
+        lay.addWidget(self.pbOverall, 1, 0, 1, 2)
+        lay.addWidget(self.lblCurrent, 2, 0, 1, 2)
+        lay.addWidget(self.pbCurrent, 3, 0, 1, 2)
+        lay.addWidget(self.lblTag, 4, 0, 1, 2)
+        lay.addWidget(self.log, 5, 0, 1, 2)
+
+    def set_total(self, done, total):
+        pct = 0 if total == 0 else int(100 * done / total)
+        self.pbOverall.setValue(pct)
+        self.lblOverall.setText(f"Overall: {done} / {total}")
+
+    def set_file(self, done, total):
+        pct = 0 if total == 0 else int(100 * done / total)
+        self.pbCurrent.setValue(pct)
+
+    def set_now(self, path, tag):
+        self.lblCurrent.setText(f"Current: {Path(path).name}")
+        self.lblTag.setText(f"Tag: {tag}")
+
+    def append(self, msg):
+        self.log.append(msg)
+        self.log.ensureCursorVisible()
+
+
 def tcell_widget():
     # ---------- STATE ----------
     primary = RowState()
@@ -347,6 +396,22 @@ def tcell_widget():
     ui.append(run_seg_btn)   # first stage
     ui.append(run_all_btn)   # second stage
 
+    # ---- Progress dock (one per widget) ----
+    progress_panel = ProgressPanel()
+    bridge = _ProgressBridge()
+
+    # connect signals to the panel (main thread safe)
+    bridge.total_changed.connect(progress_panel.set_total)
+    bridge.file_changed.connect(progress_panel.set_file)
+    bridge.now_processing.connect(progress_panel.set_now)
+    bridge.log_line.connect(progress_panel.append)
+
+    # mount the dock (left or right as you prefer)
+    try:
+        current_viewer().window.add_dock_widget(progress_panel, area="left", name="T-Cell Analysis Progress")
+    except Exception:
+        pass
+
     # ---------- GATHER ALL CASES (utility) ----------
     def _gather_all_cases() -> List[Tuple[Path, str]]:
         tasks: List[Tuple[Path, str]] = []
@@ -440,27 +505,29 @@ def tcell_widget():
 
         @thread_worker
         def _worker():
-            pbar = progress(desc="Segmentation (pilot)", total=len(chosen_to_run))
+            total = len(chosen_to_run)
+            bridge.total_changed.emit(0, total)
             for i, (p, tag) in enumerate(chosen_to_run, start=1):
-                # Double-check just in case something finished while we queued:
-                if tag in _scan_done_tags(out_dir):
-                    pbar.n = i; pbar.refresh()
-                    continue
+                bridge.now_processing.emit(str(p), str(tag))
+                bridge.file_changed.emit(0, 0)  # reset per-file bar (unknown granularity for pilot)
+                current_viewer().status = f"Working: {tag} — {Path(p).name}"
+                bridge.log_line.emit(f"Segmentation → {tag}: {p}")
 
                 run_analysis(
                     str(p),
                     str(out_dir),
                     chan_list,
                     n_workers,
-                    progress_callback=None,
+                    progress_callback=lambda d, t: bridge.file_changed.emit(d, t),
                     tag=tag,
                     save_extracted=bool(form.save_extracted.value),
                     seg_channel=chosen_seg_channel,
                     channel_rename_map=chosen_channel_map,
                 )
-                pbar.n = i; pbar.refresh()
-            return str(out_dir), chosen_to_run
 
+                bridge.total_changed.emit(i, total)
+            bridge.finished.emit()
+            return str(out_dir), chosen_to_run
 
         def _done(res):
             out_path, selected_cases = res
@@ -527,24 +594,32 @@ def tcell_widget():
 
         # carry the thresholds captured during pilot
         fea_thresh = filter_ranges.copy()
-            
+
         @thread_worker
         def _worker():
-            pbar = progress(desc="Full Analysis", total=len(to_run))
+            total = len(to_run)
+            bridge.total_changed.emit(0, total)
             for i, (p, tag) in enumerate(to_run, start=1):
+                bridge.now_processing.emit(str(p), str(tag))
+                bridge.file_changed.emit(0, 0)
+                current_viewer().status = f"Working: {tag} — {Path(p).name}"
+                bridge.log_line.emit(f"Analysis → {tag}: {p}")
+
                 run_analysis(
                     str(p),
                     str(out_dir),
                     chan_list,
                     n_workers,
-                    progress_callback=None,
+                    progress_callback=lambda d, t: bridge.file_changed.emit(d, t),
                     tag=tag,
                     save_extracted=bool(form.save_extracted.value),
                     seg_channel=seg_name,
                     channel_rename_map=ch_map,
-                    feature_thresholds=fea_thresh,   # ← thresholds applied here
+                    feature_thresholds=fea_thresh,
                 )
-                pbar.n = i; pbar.refresh()
+
+                bridge.total_changed.emit(i, total)
+            bridge.finished.emit()
             return str(out_dir), to_run
 
         def _done(res):
