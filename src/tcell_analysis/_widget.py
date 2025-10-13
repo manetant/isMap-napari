@@ -7,7 +7,8 @@ import os
 import pandas as pd
 
 from magicgui import magicgui
-from magicgui.widgets import Container, PushButton, FileEdit, Label
+from magicgui.widgets import Container, PushButton, FileEdit, Label, ComboBox, SpinBox
+
 from napari.qt.threading import thread_worker
 from napari.utils import progress
 from napari import current_viewer
@@ -189,7 +190,7 @@ def _choose_conditions_dialog(parent, pairs: List[Tuple[Path, str]]) -> List[Tup
     'label' should be the condition/tag shown to user.
     """
     dlg = QDialog(parent)
-    dlg.setWindowTitle("Select conditions to segment")
+    dlg.setWindowTitle("Select condition to set segmentation parameters")
     lay = QVBoxLayout(dlg)
     lst = QListWidget(dlg)
     lst.setSelectionMode(QListWidget.NoSelection)
@@ -300,15 +301,33 @@ def tcell_widget():
         output_folder={"widget_type": "FileEdit", "mode": "d", "label": "Output Folder"},
         num_workers={"widget_type": "SpinBox", "min": 1, "max": 32, "value": 1},
         save_extracted={"widget_type": "CheckBox", "label": "Save extracted cell crops", "value": True},
-        call_button=False,
+        
     )
     def form(
         input_folder: Path,
         output_folder: Path,
         num_workers: int,
         save_extracted: bool,
+        seg_model: str,
+        seg_diameter: int,
+        seg_scale: float,        
     ):
         ...
+
+    # ---- Segmentation Parameters Section ----
+    seg_header = Label(value="<b>Segmentation Parameters</b> "
+                             "<span style='color:#777'>(used only for segmentation)</span>")
+    seg_model = ComboBox(label="Model", choices=["cyto3", "cyto2"], value="cyto3")
+    seg_diameter = SpinBox(label="Diameter (px)", min=5, max=2000, value=100, step=1)
+    seg_scale = ComboBox(
+        label="Scale (×)",
+        choices=[f"{x/10:.1f}" for x in range(10, 2, -1)],
+        value="1.0",
+        tooltip="Scale applied to segmentation (1.0 = native size)",
+    )
+
+    seg_block = Container(layout="vertical", labels=True)
+    seg_block.extend([seg_header, seg_model, seg_diameter, seg_scale])
 
     @form.input_folder.changed.connect
     def _on_primary_changed(path: Path | None):
@@ -393,8 +412,10 @@ def tcell_widget():
     ui.append(form.num_workers)
     ui.append(form.save_extracted)
     ui.append(form.output_folder)
+    ui.append(seg_block)
     ui.append(run_seg_btn)   # first stage
     ui.append(run_all_btn)   # second stage
+
 
     # ---- Progress dock (one per widget) ----
     progress_panel = ProgressPanel()
@@ -523,6 +544,9 @@ def tcell_widget():
                     save_extracted=bool(form.save_extracted.value),
                     seg_channel=chosen_seg_channel,
                     channel_rename_map=chosen_channel_map,
+                    seg_model=str(seg_model.value),
+                    seg_diameter=int(seg_diameter.value),
+                    seg_scale=float(seg_scale.value),
                 )
 
                 bridge.total_changed.emit(i, total)
@@ -616,6 +640,9 @@ def tcell_widget():
                     seg_channel=seg_name,
                     channel_rename_map=ch_map,
                     feature_thresholds=fea_thresh,
+                    seg_model=str(seg_model.value),
+                    seg_diameter=int(seg_diameter.value),
+                    seg_scale=float(seg_scale.value),
                 )
 
                 bridge.total_changed.emit(i, total)

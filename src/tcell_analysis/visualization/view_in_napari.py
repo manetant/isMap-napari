@@ -2,6 +2,7 @@
 from pathlib import Path
 import numpy as np
 import pandas as pd
+
 from tifffile import imread
 from tifffile import imread as _tiffread
 import dask.array as da
@@ -18,12 +19,12 @@ def show_analysis_results(
     viewer,
     output_folder,
     channel_names,
-    tasks_with_tags,             # kept for API compatibility (unused now)
+    tasks_with_tags,       
     text_feature=None,
     text_size=11,
     text_color="yellow",
     rgb=False,
-    initial_ranges=None,           # NEW: dict like {"circularity": (0.3, 1.0), ...}
+    initial_ranges=None,         
     on_filter_change=None, 
     show_filter: bool = True,
     show_boxplot: bool = True,

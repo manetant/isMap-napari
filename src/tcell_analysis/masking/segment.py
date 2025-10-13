@@ -38,10 +38,10 @@ def _get_model(
 def segment_channel(
     image: np.ndarray,
     gpu: bool = True,
-    diameter: int = 200,
+    diameter: int = 100,
     *,
     model_type: str = "cyto3",
-    use_denoise: bool = False,
+    use_denoise: bool = True,
     normalize_input: bool = False,
     scale: float = 1.0,
 ) -> Tuple[list, list, list, list]:

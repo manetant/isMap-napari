@@ -346,6 +346,9 @@ def process_tiff(
         make_qc=False,
         seg_channel: str | None = None,
         feature_thresholds: Dict[str, tuple] | None = None,
+        seg_model: str = "cyto3",
+        seg_diameter: int = 100,
+        seg_scale: float = 1.0,        
         ):
 
     results = []
@@ -378,14 +381,19 @@ def process_tiff(
             print(f"[WARN] seg_channel '{seg_channel}' not found in {channel_names}. Using '{seg}'.")
 
     seg_image = channel_images[seg]
+    seg_model = ("cyto3" if str(seg_model).lower() not in {"cyto2", "cyto3"} else str(seg_model).lower())
+    seg_scale = float(np.clip(seg_scale, 0.25, 1.0))
+    seg_diameter = int(max(1, seg_diameter))
+
     with timeit("cellpose segmentation"):
         masks, flows, styles, imgs_dn = segment_channel(
             seg_image,
             gpu=torch.cuda.is_available(),
-            diameter=100,
-            model_type="cyto3",
-            scale=0.4, # scale down the image to 25%
+            diameter=seg_diameter,
+            model_type=seg_model,
+            scale=seg_scale,
         )
+
 
     mask_image = masks[0]
     binary_mask = (mask_image > 0).astype(np.uint8)
@@ -552,6 +560,9 @@ def process_image_file(
         seg_channel: str | None = None,
         channel_rename_map: Dict[str, str] | None = None,
         feature_thresholds: Dict[str, tuple] | None = None,
+        seg_model: str = "cyto3",
+        seg_diameter: int = 100,
+        seg_scale: float = 1.0,        
     ):
     case_name = os.path.splitext(os.path.basename(file_path))[0]
     print(f"[INFO] ➤ Processing case: {case_name}")
@@ -619,7 +630,10 @@ def process_image_file(
             save_extracted=save_extracted,
             make_qc=False,
             seg_channel=seg_channel,
-            feature_thresholds=feature_thresholds, 
+            feature_thresholds=feature_thresholds,
+            seg_model=seg_model,
+            seg_diameter=seg_diameter,
+            seg_scale=seg_scale,    
         )
 
         # Cache per-case channel metrics + DONE.json
@@ -652,6 +666,9 @@ def process_folder(
         seg_channel: str | None = None,
         channel_rename_map: Dict[str, str] | None = None,
         feature_thresholds: Dict[str, tuple] | None = None,
+        seg_model: str = "cyto3",
+        seg_diameter: int = 100,
+        seg_scale: float = 1.0,        
     ):
 
     all_results: list[dict] = []
@@ -693,7 +710,8 @@ def process_folder(
             all_results.extend(approx)
             continue
 
-        to_run.append((file_path, chs, in_root, out_root, n_workers, tg, save_ext, segch, cmap))
+        to_run.append((file_path, chs, in_root, out_root, n_workers, tg, save_ext, 
+                       segch, cmap, seg_model, seg_diameter, seg_scale))
 
     print(f"[INFO] Found {len(tasks)} frames total; {len(to_run)} to process, {len(tasks)-len(to_run)} already complete.\n")
 
@@ -709,9 +727,13 @@ def process_folder(
                 code_version=code_version,
                 seg_channel=segch,             
                 channel_rename_map=cmap,  
-                feature_thresholds=feature_thresholds,         
+                feature_thresholds=feature_thresholds, 
+                seg_model=seg_model,
+                seg_diameter=seg_diameter,
+                seg_scale=seg_scale,        
             ): (file_path, chs)
-            for (file_path, chs, in_root, out_root, n_workers, tg, save_ext, segch, cmap) in to_run
+            for (file_path, chs, in_root, out_root, n_workers, tg, save_ext, 
+                 segch, cmap, seg_model, seg_diameter, seg_scale) in to_run
         }
         with tqdm(total=len(futures), desc="Processing frames") as pbar:
             for future in as_completed(futures):
@@ -785,6 +807,9 @@ def run_analysis(
         seg_channel: str | None = None,
         channel_rename_map: Dict[str, str] | None = None,
         feature_thresholds: Dict[str, tuple] | None = None, 
+        seg_model: str = "cyto3",
+        seg_diameter: int = 100,
+        seg_scale: float = 1.0,        
     ):
 
     input_root = str(Path(input_folder))
@@ -796,6 +821,9 @@ def run_analysis(
         "save_extracted": save_extracted,
         "code_version": code_version,
         "seg_channel": seg_channel,
+        "seg_params": {"model": seg_model, 
+                       "diameter_px": seg_diameter, 
+                       "scale": seg_scale},
     }, indent=2))
 
     if not os.path.exists(input_root):
@@ -824,6 +852,9 @@ def run_analysis(
         seg_channel=seg_channel,
         channel_rename_map=channel_rename_map,
         feature_thresholds=feature_thresholds, 
+        seg_model=seg_model,
+        seg_diameter=seg_diameter,
+        seg_scale=seg_scale,        
     )
 
     '''
@@ -840,5 +871,5 @@ def run_analysis(
     #radial_channels = [seg_channel] if seg_channel else ([channel_names[-1]] if channel_names else [])
     condition_root = Path(output_root) / Path(input_folder).name  # output/<condition>
     for ch in (channel_names or []):
-        _aggregate_radials_for_condition(condition_root, tag, ch, scale_images="No", target_size=None)
+        _aggregate_radials_for_condition(condition_root, tag, ch, scale_images="Yes", target_size=None)
 
