@@ -405,7 +405,7 @@ def process_tiff(
     frame_name = os.path.splitext(os.path.basename(tiff_path))[0]
 
     with timeit("extract cells"):
-        cell_crops, valid_labels = extract_cells(stacked_image, mask_image, tile_size=512)
+        cell_crops, valid_labels = extract_cells(stacked_image, mask_image, tile_size=128)
     
     features_df = extract_features_for_labels(
         mask_image, channel_images, channel_names, valid_labels, num_workers
