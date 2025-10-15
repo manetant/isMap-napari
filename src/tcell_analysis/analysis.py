@@ -442,6 +442,11 @@ def process_tiff(
     features_df.insert(0, "tag", tag)
     features_df.insert(1, "image", os.path.basename(tiff_path))
 
+    # column order
+    first_cols = ["tag", "image"]
+    other_cols = [c for c in features_df.columns if c not in first_cols]
+    features_df = features_df[first_cols + other_cols]
+
     csv_out = os.path.join(os.path.dirname(tiff_path), "per_cell_features.csv")
     print(f"[INFO] Writing per-cell features to: {csv_out}")
     _atomic_write_csv(features_df, csv_out)

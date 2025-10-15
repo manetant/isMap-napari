@@ -718,7 +718,13 @@ def show_analysis_results(
             data["frame_name"] = [names_valid[int(i)] for i in filtered_coords[:, 0]]
             data["frame_tag"]  = [tags_valid[int(i)]  for i in filtered_coords[:, 0]]
 
-            pd.DataFrame(data).to_csv(out_path, index=False)
+            # Explicit column order: tag, name, then everything else
+            df = pd.DataFrame(data)
+            first_cols = ["frame_tag", "frame_name"]
+            ordered_cols = first_cols + [c for c in df.columns if c not in first_cols]
+            df = df[ordered_cols]
+
+            df.to_csv(out_path, index=False)
             viewer.status = f"✅ Exported filtered points to: {out_path}"
 
         export_button.changed.connect(_do_export)
