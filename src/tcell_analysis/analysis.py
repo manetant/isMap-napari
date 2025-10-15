@@ -20,7 +20,6 @@ from .extract_cells import extract_cells, save_cells
 from .masking.segment import segment_channel
 from .metrics import calculate_intensity_metrics, extract_features_for_labels
 from .my_utils import convert_nd2_to_tiff, read_any_to_cyx
-from .preprocessing.background import bg_remove_rolling_ball, bg_remove_gaussian, bg_remove_tophat
 from .visualization.plots import save_all_channels_plot, save_channel_overlays
 from typing import Union
 from typing import Any, Dict, List
@@ -119,6 +118,18 @@ def timeit_gpu(msg: str):
 
 CODE_VERSION = "2025-09-17.1"
 
+def _read_done_bg(case_dir: str | Path) -> dict | None:
+    p = _done_json_path(case_dir)
+    if not p.exists():
+        return None
+    try:
+        data = json.loads(p.read_text())
+        return data.get("bg")
+    except Exception:
+        return None
+
+def _bg_equal(a: dict | None, b: dict | None) -> bool:
+    return (a or {}) == (b or {})
 
 def _to_jsonable(v: Any) -> Any:
     if isinstance(v, (np.floating,)):
@@ -270,15 +281,17 @@ def _purge_case_radials_and_cache(case_dir: str | Path) -> None:
         pass
 
 def _write_done(case_dir: str | Path, *, tag: str, image: str, channels: list[str],
-                code_version: str, filters: dict | None = None, seg_channel: str | None = None) -> None:
+                code_version: str, filters: dict | None = None, seg_channel: str | None = None,
+                bg_params: dict | None = None) -> None:                               # <— add
     meta = {
         "tag": tag,
         "image": image,
         "channels": list(channels),
         "code_version": code_version,
         "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "filters": _norm_filters(filters),          
-        "seg_channel": seg_channel or "",           
+        "filters": _norm_filters(filters),
+        "seg_channel": seg_channel or "",
+        "bg": bg_params or {},                                                      # <— add
     }
     tmp = str(_done_json_path(case_dir)) + ".tmp"
     Path(tmp).write_text(json.dumps(meta, indent=2))
@@ -313,14 +326,6 @@ def _approximate_metrics_from_csv(csv_path: Path, tag: str, image_name: str | No
         out.append({"channel": ch, "tag": tag, "image": image_name or "", "N": int(len(vals)), "mean_intensity": float(vals.mean())})
     return out
 
-def bg_removal(img, method="rolling_ball", radius=25, max_side=256):
-    if method == "rolling_ball":
-        return bg_remove_rolling_ball(img, radius=radius, max_side=max_side)
-    if method == "gaussian":
-        return bg_remove_gaussian(img, radius=radius, max_side=max_side)
-    if method == "tophat":
-        return bg_remove_tophat(img, radius=radius, max_side=max_side)
-    raise ValueError(method)
 
 def _get_2d_channel(crop: np.ndarray, ci: int) -> np.ndarray:
     """
@@ -357,22 +362,6 @@ def process_tiff(
     channel_images = {
         channel_names[i]: stacked_image[i] for i in range(len(channel_names))
     }
-
-    # Background removal parameters
-    BG_METHOD = "rolling_ball"
-    BG_RADIUS = 50
-    BG_MAX_SIDE = 256 
-    with timeit_cpu(f"background removal (all channels: {BG_METHOD}, r={BG_RADIUS})"):
-        for ch_name, ch_img in list(channel_images.items()):
-            if ch_img is None:
-                continue
-            channel_images[ch_name] = bg_removal(
-                ch_img,
-                method=BG_METHOD,
-                radius=BG_RADIUS,
-                max_side=BG_MAX_SIDE,
-            )
-
 
     if make_qc:
         all_channels_path = os.path.join(os.path.dirname(tiff_path), "all_channels.png")
@@ -595,8 +584,12 @@ def process_image_file(
     same_version = (prev_version == code_version)
     same_filters = _filters_equal(prev_filters, want_filters)
 
+    prev_bg = _read_done_bg(tiff_output_dir)
+    want_bg = {"apply": True, "method": "rolling_ball", "radius": 50, "max_side": None}
+
+    same_bg = _bg_equal(prev_bg, want_bg)
     # Fast skip if complete for this code_version
-    if skip_if_complete and complete_now and same_version and same_filters:
+    if skip_if_complete and complete_now and same_version and same_filters and same_bg:
         cached = _load_cached_metrics(tiff_output_dir)
         if cached:
             return cached
@@ -606,6 +599,9 @@ def process_image_file(
 
     # If outputs exist but filters differ, purge stale per-ROI radials + cache
     if complete_now and not same_filters:
+        _purge_case_radials_and_cache(tiff_output_dir)
+
+    if complete_now and not same_bg:
         _purge_case_radials_and_cache(tiff_output_dir)
 
     # Acquire lock to avoid concurrent double work
@@ -629,7 +625,21 @@ def process_image_file(
             t_index=0,
             channel_map=channel_rename_map,
             desired_order=channel_names,
+            apply_bg=True,
+            bg_method="rolling_ball",
+            bg_radius=50,
+            bg_max_side=None
         )
+        want_bg = {
+            "apply": False,
+            "method": None,
+            "radius": None,
+            "max_side": None,
+        }
+        
+        prev_bg = _read_done_bg(tiff_output_dir)
+        same_bg = _bg_equal(prev_bg, want_bg)
+
         print(f"[DEBUG] wrote to {tiff_path}; channels={channel_names}; cyx={cyx.shape}")
 
         results = process_tiff(
@@ -650,10 +660,16 @@ def process_image_file(
 
         # Cache per-case channel metrics + DONE.json
         _save_cached_metrics(tiff_output_dir, results)
-        _write_done(tiff_output_dir, tag=tag, image=os.path.basename(tiff_path),
-                    channels=channel_names, code_version=code_version,
-                    filters=feature_thresholds, seg_channel=seg_channel,
-                    )
+        _write_done(
+            tiff_output_dir,
+            tag=tag,
+            image=os.path.basename(tiff_path),
+            channels=channel_names,
+            code_version=code_version,
+            filters=feature_thresholds,
+            seg_channel=seg_channel,
+            bg_params=want_bg,
+        )
 
         gc.collect()
         if torch.cuda.is_available():

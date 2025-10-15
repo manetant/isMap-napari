@@ -8,6 +8,10 @@ from typing import Dict, List, Optional, Tuple
 import time
 import logging
 
+from .preprocessing.background import (bg_remove_rolling_ball,
+                                       bg_remove_gaussian,
+                                       bg_remove_tophat)
+
 logger = logging.getLogger(__name__)
 
 def _norm_name(s: str) -> str:
@@ -51,6 +55,21 @@ def _ome_channel_names_from_tiff(path: str) -> Optional[List[str]]:
     except Exception:
         return None
 
+def _bg_remove(img: np.ndarray, method: str, radius: int,
+               max_side: Optional[int] = None) -> np.ndarray:
+    method = str(method).lower()
+    kwargs = {"radius": radius}
+    if max_side is not None:
+        kwargs["max_side"] = max_side
+
+    if method == "rolling_ball":
+        return bg_remove_rolling_ball(img, **kwargs)
+    if method == "gaussian":
+        return bg_remove_gaussian(img, **kwargs)
+    if method == "tophat":
+        return bg_remove_tophat(img, **kwargs)
+    raise ValueError(f"Unknown bg method: {method}")
+
 
 def read_any_to_cyx(
     file_path: str,
@@ -64,6 +83,10 @@ def read_any_to_cyx(
     save_ome_tiff: bool = False,                  # write combined OME-TIFF with names
     compression: Optional[str] = "zlib",          # or None/"lzma"/"zstd"
     scene_index: Optional[int] = None,
+    apply_bg: bool = False,
+    bg_method: str = "rolling_ball",
+    bg_radius: int = 50,
+    bg_max_side: Optional[int] = None, 
 ) -> Tuple[np.ndarray, Optional[str], List[str]]:
     """
     Load an image and return ONLY the requested channels in the requested order.
@@ -178,6 +201,26 @@ def read_any_to_cyx(
     # standardize dtype (optional)
     cyx = cyx.astype(np.float32, copy=False)
 
+    bg_meta = {
+        "BackgroundRemoved": bool(apply_bg),
+        "BackgroundMethod": (str(bg_method) if apply_bg else None),
+        "BackgroundRadius": (int(bg_radius) if apply_bg else None),
+        "BackgroundMaxSide": (int(bg_max_side) if (apply_bg and bg_max_side is not None) else None),
+    }
+
+    # apply bg_removal if desired (optional)
+    if apply_bg:
+        t0 = time.perf_counter()
+        for ci in range(cyx.shape[0]):
+            cyx[ci] = _bg_remove(
+                cyx[ci],
+                method=bg_method,
+                radius=bg_radius,
+                max_side=bg_max_side,
+            )
+        dt = (time.perf_counter() - t0) * 1000.0
+        logger.info(f"[BG] Applied {bg_method} (r={bg_radius}) to {cyx.shape[0]} channels in {dt:.1f} ms")
+
     # ---- write outputs (only filtered set)
     combined_tiff_path = None
     if tiff_output_dir:
@@ -208,7 +251,7 @@ def read_any_to_cyx(
                 combined_tiff_path,
                 cyx,
                 ome=True,
-                metadata={"axes": "CYX", "Channel": {"Name": final_names}},
+                metadata={"axes":"CYX","Channel":{"Name":final_names}, **bg_meta},
                 bigtiff=True,
                 compression=compression,
             )
@@ -216,7 +259,7 @@ def read_any_to_cyx(
             tiff.imwrite(
                 combined_tiff_path,
                 cyx,
-                metadata={"axes": "CYX", "channel_names": final_names},
+                metadata={"axes":"CYX","channel_names":final_names, **bg_meta},
                 bigtiff=True,
                 compression=compression,
             )

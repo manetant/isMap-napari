@@ -21,7 +21,6 @@ def _safe_pearson(a: np.ndarray, b: np.ndarray) -> float:
         return np.nan
     try:
         if _pearson is not None:
-            print(f"DEBUG: Using skimage pearson_corr_coeff")
             return _pearson(a, b)
         # fallback
         r = float(np.corrcoef(a, b)[0, 1])

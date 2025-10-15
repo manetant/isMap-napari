@@ -269,7 +269,7 @@ def show_analysis_results(
     )
 
     # show only the borders (in pixels). 1–2 looks nice; 0 = filled
-    labels_layer.contour = 1
+    labels_layer.contour = 3
     labels_layer.opacity = 1.0         # keep lines fully visible
     labels_layer.blending = "translucent"  # overlays cleanly on grayscale channels
 
@@ -745,7 +745,7 @@ def show_analysis_results(
                 ax_pcc_m.set_xticks(xpos)
                 ax_pcc_m.set_xticklabels(labels, rotation=20, ha="right")
                 ax_pcc_m.set_ylabel(f"PCC – {target}")
-                ax_pcc_m.set_ylim(-0.2, 1.0)
+                ax_pcc_m.set_ylim(-1.0, 1.0)
                 ax_pcc_m.set_title("PCC vs other channels")
                 fig_pcc_m.tight_layout()
                 canvas_pcc_m.draw_idle()
