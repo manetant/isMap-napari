@@ -330,6 +330,10 @@ def show_analysis_results(
     points.edge_color = "red"
     points.text = {"string": texts_list, "size": text_size, "color": text_color, "anchor": "center"}
 
+    # add condition per point as a property so we can filter PCC by it
+    #_cond_per_point = np.array([tags_valid[int(fi)] for fi in all_coords_np[:, 0]], dtype=object)
+    #points.properties["frame_tag"] = _cond_per_point
+
     # ---------- overlay using CSV tag ----------
     viewer.text_overlay.visible = True
     viewer.text_overlay.position = "top_left"
@@ -651,26 +655,39 @@ def show_analysis_results(
     # ---------- PCC (metrics) tab ----------
     # Columns are named: PCC_{channelA}_vs_{channelB}
     if show_pcc:
-        import re as _re
-        _pcc_re = _re.compile(r"^PCC_(.+)_vs_(.+)$")
-
-        # Build a fast lookup of available PCC columns
-        pcc_cols = [c for c in points.properties.keys() if c.startswith("PCC_")]
-        # Use the already-constructed channel list for napari layers
+        cond_choices = sorted(set(tags_valid))
+        
         # ch_names is defined earlier from channel_names / image stack shape
         _all_channels_for_pcc = list(ch_names)
 
         # Helper to fetch PCC values for (ref=R, target=T)
-        # Helper to fetch PCC values for (ref=R, target=T), try both orders.
-        def _get_pcc_values(R: str, T: str) -> np.ndarray | None:
-            # Try direct order first
+        def _get_pcc_values(R: str, T: str, cond: str) -> np.ndarray | None:
+            # build condition mask (all vs specific)
+            print(points.properties.keys())
+            print(f"[DEBUG] Building cond_mask for condition: {cond}")
+            print(points.properties.get("tag", None))
+            print(f"[DEBUG] points.data shape: {points.data.shape}")
+
+            if "tag" in points.properties:
+                print(f"[DEBUG] Available tag property with {len(points.properties['tag'])} entries")   
+                print(points.properties['tag'][:10])
+
+                cond_all = np.asarray(points.properties["tag"])
+                cond_mask = cond_all == cond
+            else:
+                # fallback: no condition column available
+                cond_mask = np.ones(points.data.shape[0], dtype=bool)
+
+            # Try both PCC column orders and apply condition mask
             for col in (f"PCC_{R}_vs_{T}", f"PCC_{T}_vs_{R}"):
                 vals_all = points.properties.get(col, None)
-                if vals_all is not None:
-                    vals = np.asarray(vals_all, dtype=float)
-                    vals = vals[np.isfinite(vals)]
-                    if vals.size:
-                        return vals
+                if vals_all is None:
+                    continue
+                vals = np.asarray(vals_all, dtype=float)
+                vals = vals[cond_mask]
+                vals = vals[np.isfinite(vals)]
+                if vals.size:
+                    return vals
             return None
 
 
@@ -685,16 +702,21 @@ def show_analysis_results(
 
             @magicgui(
                 auto_call=True,
+                condition={"choices": cond_choices, "label": "Condition"},
                 target={"choices": _all_channels_for_pcc, "label": "Target channel (Y-axis)"},
                 show_points={"widget_type": "CheckBox", "label": "Show points", "value": True},
                 show_boxes={"widget_type": "CheckBox", "label": "Show boxes", "value": True},
             )
             def pcc_controls(
+                condition: str = cond_choices[0],
                 target: str = _all_channels_for_pcc[0] if _all_channels_for_pcc else "",
                 show_points: bool = True,
                 show_boxes: bool = True,
             ):
                 ax_pcc_m.clear()
+
+                print(f"[DEBUG] PCC controls: target={target}, condition={condition}, show_points={show_points}, show_boxes={show_boxes}")
+                print(_all_channels_for_pcc)
 
                 if not target:
                     ax_pcc_m.set_title("Pick a target channel")
@@ -706,36 +728,31 @@ def show_analysis_results(
                     canvas_pcc_m.draw_idle()
                     return
 
-                labels = []
-                data = []
+                labels, data = [], []
 
-                # For every other channel R, try to plot PCC_{R}_vs_{target}
                 for R in _all_channels_for_pcc:
                     if R == target:
                         continue
-                    vals = _get_pcc_values(R, target)
+                    vals = _get_pcc_values(R, target, condition)
                     if vals is None:
                         continue
                     labels.append(str(R))
                     data.append(vals)
 
+                print(f"[DEBUG] PCC data for target {target}, condition {condition}: {[(labels[i], len(data[i])) for i in range(len(labels))]}")
+
                 if len(data) == 0:
-                    ax_pcc_m.set_title(f"No PCC columns found for target: {target}")
+                    ax_pcc_m.set_title(f"No PCC columns for target: {target} (cond: {condition})")
                     canvas_pcc_m.draw_idle()
                     return
 
                 xpos = np.arange(len(labels))
-
                 if show_boxes:
-                    ax_pcc_m.boxplot(
-                        data,
-                        positions=xpos,
-                        patch_artist=True,
-                        boxprops=dict(facecolor="lightgray", edgecolor="black"),
-                        medianprops=dict(color="black"),
-                        whiskerprops=dict(color="black"),
-                        capprops=dict(color="black"),
-                    )
+                    ax_pcc_m.boxplot(data, positions=xpos, 
+                                     patch_artist=True, 
+                                     boxprops=dict(facecolor="lightgray", edgecolor="black"), 
+                                     medianprops=dict(color="black"), whiskerprops=dict(color="black"), 
+                                     capprops=dict(color="black"), )
 
                 if show_points:
                     for i, vals in enumerate(data):
@@ -746,9 +763,10 @@ def show_analysis_results(
                 ax_pcc_m.set_xticklabels(labels, rotation=20, ha="right")
                 ax_pcc_m.set_ylabel(f"PCC – {target}")
                 ax_pcc_m.set_ylim(-1.0, 1.0)
-                ax_pcc_m.set_title("PCC vs other channels")
+                ax_pcc_m.set_title(f"PCC vs other channels — {condition}")
                 fig_pcc_m.tight_layout()
                 canvas_pcc_m.draw_idle()
+
 
             # Redraw when filtered points change
             def _on_points_changed_pcc(event=None):

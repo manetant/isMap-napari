@@ -201,15 +201,17 @@ def read_any_to_cyx(
     # standardize dtype (optional)
     cyx = cyx.astype(np.float32, copy=False)
 
-    bg_meta = {
-        "BackgroundRemoved": bool(apply_bg),
-        "BackgroundMethod": (str(bg_method) if apply_bg else None),
-        "BackgroundRadius": (int(bg_radius) if apply_bg else None),
-        "BackgroundMaxSide": (int(bg_max_side) if (apply_bg and bg_max_side is not None) else None),
-    }
-
+    bg_meta = {}
     # apply bg_removal if desired (optional)
     if apply_bg:
+        
+        bg_meta = {
+            "BackgroundRemoved": bool(apply_bg),
+            "BackgroundMethod": (str(bg_method) if apply_bg else None),
+            "BackgroundRadius": (int(bg_radius) if apply_bg else None),
+            "BackgroundMaxSide": (int(bg_max_side) if (apply_bg and bg_max_side is not None) else None),
+        }
+        
         t0 = time.perf_counter()
         for ci in range(cyx.shape[0]):
             cyx[ci] = _bg_remove(

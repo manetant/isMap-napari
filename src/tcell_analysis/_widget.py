@@ -300,14 +300,14 @@ def tcell_widget():
         input_folder={"widget_type": "FileEdit", "mode": "d", "label": "Input Folder"},
         output_folder={"widget_type": "FileEdit", "mode": "d", "label": "Output Folder"},
         num_workers={"widget_type": "SpinBox", "min": 1, "max": 32, "value": 1},
-        save_extracted={"widget_type": "CheckBox", "label": "Save extracted cell crops", "value": True},
+        #save_extracted={"widget_type": "CheckBox", "label": "Save extracted cell crops", "value": True},
         
     )
     def form(
         input_folder: Path,
         output_folder: Path,
         num_workers: int,
-        save_extracted: bool,
+        #save_extracted: bool,
         seg_model: str,
         seg_diameter: int,
         seg_scale: float,        
@@ -350,7 +350,7 @@ def tcell_widget():
                 primary.tag = t or ""
                 primary.tagged_path = cur
             primary.conditions_by_subfolder.clear(); primary.conditions_for_path = ""
-
+    '''
     # ---------- EXTRA INPUTS ----------
     add_btn = PushButton(label="+ Add input")
     extra_box = Container(layout="vertical", labels=True, scrollable=False)
@@ -400,6 +400,7 @@ def tcell_widget():
     @add_btn.changed.connect
     def _on_add(_=None):
         _make_extra_row()
+    '''
 
     # ---------- BUILD UI ORDER ----------
     run_seg_btn = PushButton(label="Run Segmentation")
@@ -407,10 +408,10 @@ def tcell_widget():
 
     ui = Container(layout="vertical", labels=True)
     ui.append(form.input_folder)
-    ui.append(add_btn)
-    ui.append(extra_box)
+    #ui.append(add_btn)
+    #ui.append(extra_box)
     ui.append(form.num_workers)
-    ui.append(form.save_extracted)
+    #ui.append(form.save_extracted)
     ui.append(form.output_folder)
     ui.append(seg_block)
     ui.append(run_seg_btn)   # first stage
@@ -434,6 +435,7 @@ def tcell_widget():
         pass
 
     # ---------- GATHER ALL CASES (utility) ----------
+    '''
     def _gather_all_cases() -> List[Tuple[Path, str]]:
         tasks: List[Tuple[Path, str]] = []
 
@@ -476,6 +478,27 @@ def tcell_widget():
                         state_by_row[fe] = st
                 if st.tag.strip():
                     tasks.append((base, st.tag))
+        return tasks
+    '''
+
+    def _gather_all_cases() -> List[Tuple[Path, str]]:
+        tasks: List[Tuple[Path, str]] = []
+        if form.input_folder.value:
+            base = Path(form.input_folder.value)
+            subs = _iter_immediate_subfolders(base)
+            if subs:
+                if not primary.conditions_by_subfolder:
+                    primary.conditions_by_subfolder = _ask_conditions_for_subfolders(form, base, None)
+                    primary.conditions_for_path = str(base)
+                for s in sorted(subs):
+                    tasks.append((s, primary.conditions_by_subfolder.get(s.name, s.name)))
+            else:
+                if not primary.tag.strip():
+                    t = _prompt_text(form, "Tag this input", f"Enter a tag for “{base.name}”:", base.name)
+                    if t:
+                        primary.tag = t; primary.tagged_path = str(base)
+                if primary.tag.strip():
+                    tasks.append((base, primary.tag))
         return tasks
 
     # ---------- RUN SEGMENTATION (pilot) ----------
@@ -541,7 +564,7 @@ def tcell_widget():
                     n_workers,
                     progress_callback=lambda d, t: bridge.file_changed.emit(d, t),
                     tag=tag,
-                    save_extracted=bool(form.save_extracted.value),
+                    save_extracted=False, #bool(form.save_extracted.value),
                     seg_channel=chosen_seg_channel,
                     channel_rename_map=chosen_channel_map,
                     seg_model=str(seg_model.value),
@@ -637,7 +660,7 @@ def tcell_widget():
                     n_workers,
                     progress_callback=lambda d, t: bridge.file_changed.emit(d, t),
                     tag=tag,
-                    save_extracted=bool(form.save_extracted.value),
+                    save_extracted=False, #bool(form.save_extracted.value),
                     seg_channel=seg_name,
                     channel_rename_map=ch_map,
                     feature_thresholds=fea_thresh,

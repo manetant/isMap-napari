@@ -46,7 +46,11 @@ def ensure_square(img: np.ndarray, auto_square: bool) -> np.ndarray:
     if h == w:
         return img
     if not auto_square:
-        raise ValueError(f"Image is not square (H={h}, W={w}). Use auto_square=True to crop.")
+        raise ValueError(
+            f"Image is not square (H={h}, W={w}). "
+            f"Consider using auto_square=True to crop the image to a square, "
+            f"or pad the image to make it square before processing."
+        )
     side = min(h, w)
     y0 = (h - side)//2
     x0 = (w - side)//2
@@ -461,7 +465,7 @@ def process_tiff(
         mask_filtered = mask_image
 
     # Choose which channels to compute radials for
-    RADIAL_CHANNELS = list(channel_names)   # <-- ALL channels now (you asked for this)
+    RADIAL_CHANNELS = list(channel_names)   
     AUTO_SQUARE = True
     proc_dir = Path(os.path.dirname(tiff_path))
     cond_dir = Path(output_dir) / f"res_{tag}"
@@ -636,7 +640,7 @@ def process_image_file(
             "radius": None,
             "max_side": None,
         }
-        
+
         prev_bg = _read_done_bg(tiff_output_dir)
         same_bg = _bg_equal(prev_bg, want_bg)
 
