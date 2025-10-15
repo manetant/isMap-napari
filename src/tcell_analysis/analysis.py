@@ -358,14 +358,21 @@ def process_tiff(
         channel_names[i]: stacked_image[i] for i in range(len(channel_names))
     }
 
-    with timeit_cpu("background removal (ICAM1)"):
-        if "ICAM1" in channel_images and channel_images["ICAM1"] is not None:
-            channel_images["ICAM1"] = bg_removal(
-                channel_images["ICAM1"],
-                method="rolling_ball",    # try: "gaussian" or "tophat" for big wins
-                radius=25,
-                max_side=256,
+    # Background removal parameters
+    BG_METHOD = "rolling_ball"
+    BG_RADIUS = 50
+    BG_MAX_SIDE = 256 
+    with timeit_cpu(f"background removal (all channels: {BG_METHOD}, r={BG_RADIUS})"):
+        for ch_name, ch_img in list(channel_images.items()):
+            if ch_img is None:
+                continue
+            channel_images[ch_name] = bg_removal(
+                ch_img,
+                method=BG_METHOD,
+                radius=BG_RADIUS,
+                max_side=BG_MAX_SIDE,
             )
+
 
     if make_qc:
         all_channels_path = os.path.join(os.path.dirname(tiff_path), "all_channels.png")

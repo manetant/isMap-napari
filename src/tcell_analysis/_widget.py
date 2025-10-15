@@ -572,6 +572,7 @@ def tcell_widget():
                     show_boxplot=False,
                     export_csv=False,
                     show_radial_viewer=False,
+                    show_pcc=False,
                 )
             except Exception as e:
                 viewer.status = f"⚠️ Visualization warning: {e}"
@@ -664,6 +665,7 @@ def tcell_widget():
                     show_boxplot=True,
                     export_csv=True,
                     show_radial_viewer=True,
+                    show_pcc=True,
                 )
             except Exception as e:
                 viewer.status = f"⚠️ Visualization warning: {e}"

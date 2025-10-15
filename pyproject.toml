@@ -40,7 +40,7 @@ dependencies = [
     "napari[all]",
     "magicgui",
     "qtpy",
-    "scikit-image",
+    "scikit-image==0.25.2",
     "scikit-learn",
     "tifffile",
     "psutil",

@@ -2,7 +2,7 @@
 from pathlib import Path
 import numpy as np
 import pandas as pd
-
+import re as _re
 from tifffile import imread
 from tifffile import imread as _tiffread
 import dask.array as da
@@ -28,6 +28,7 @@ def show_analysis_results(
     on_filter_change=None, 
     show_filter: bool = True,
     show_boxplot: bool = True,
+    show_pcc: bool = True,
     export_csv: bool = True,
     show_radial_viewer: bool = True,
 ):
@@ -41,6 +42,9 @@ def show_analysis_results(
     panel_lp = None          # matplotlib canvas panel for radial profiles
     boxplot_controls = None
     panel = None             # matplotlib canvas panel for boxplot
+    # PCC (metrics) tab placeholders
+    pcc_controls = None
+    panel_pcc_metrics = None
 
 
     # keep strong refs for dock widgets / magicgui objects
@@ -257,7 +261,17 @@ def show_analysis_results(
     mask_stack = np.stack(masks_valid, axis=0)
     if not np.issubdtype(mask_stack.dtype, np.integer):
         mask_stack = mask_stack.astype(np.int32, copy=False)
-    viewer.add_labels(mask_stack, name="Mask Stack", metadata={PLUGIN_TAG: True})
+    #viewer.add_labels(mask_stack, name="Mask Stack", metadata={PLUGIN_TAG: True})
+    labels_layer = viewer.add_labels(
+        mask_stack,
+        name="Mask Stack",
+        metadata={PLUGIN_TAG: True},
+    )
+
+    # show only the borders (in pixels). 1–2 looks nice; 0 = filled
+    labels_layer.contour = 1
+    labels_layer.opacity = 1.0         # keep lines fully visible
+    labels_layer.blending = "translucent"  # overlays cleanly on grayscale channels
 
     # ---------- points/properties/text (vectorized) ----------
     # Align dfs and tags to valid_idxs too
@@ -633,6 +647,121 @@ def show_analysis_results(
     else:
         _remove_dock("Intensity Boxplot") 
         _remove_dock("Boxplot Controls")
+    
+    # ---------- PCC (metrics) tab ----------
+    # Columns are named: PCC_{channelA}_vs_{channelB}
+    if show_pcc:
+        import re as _re
+        _pcc_re = _re.compile(r"^PCC_(.+)_vs_(.+)$")
+
+        # Build a fast lookup of available PCC columns
+        pcc_cols = [c for c in points.properties.keys() if c.startswith("PCC_")]
+        # Use the already-constructed channel list for napari layers
+        # ch_names is defined earlier from channel_names / image stack shape
+        _all_channels_for_pcc = list(ch_names)
+
+        # Helper to fetch PCC values for (ref=R, target=T)
+        # Helper to fetch PCC values for (ref=R, target=T), try both orders.
+        def _get_pcc_values(R: str, T: str) -> np.ndarray | None:
+            # Try direct order first
+            for col in (f"PCC_{R}_vs_{T}", f"PCC_{T}_vs_{R}"):
+                vals_all = points.properties.get(col, None)
+                if vals_all is not None:
+                    vals = np.asarray(vals_all, dtype=float)
+                    vals = vals[np.isfinite(vals)]
+                    if vals.size:
+                        return vals
+            return None
+
+
+        if _all_channels_for_pcc:
+            # Figure + canvas
+            fig_pcc_m, ax_pcc_m = plt.subplots()
+            canvas_pcc_m = FigureCanvas(fig_pcc_m)
+            panel_pcc_metrics = QWidget()
+            _pcc_layout = QVBoxLayout(panel_pcc_metrics)
+            _pcc_layout.setContentsMargins(6, 6, 6, 6)
+            _pcc_layout.addWidget(canvas_pcc_m)
+
+            @magicgui(
+                auto_call=True,
+                target={"choices": _all_channels_for_pcc, "label": "Target channel (Y-axis)"},
+                show_points={"widget_type": "CheckBox", "label": "Show points", "value": True},
+                show_boxes={"widget_type": "CheckBox", "label": "Show boxes", "value": True},
+            )
+            def pcc_controls(
+                target: str = _all_channels_for_pcc[0] if _all_channels_for_pcc else "",
+                show_points: bool = True,
+                show_boxes: bool = True,
+            ):
+                ax_pcc_m.clear()
+
+                if not target:
+                    ax_pcc_m.set_title("Pick a target channel")
+                    canvas_pcc_m.draw_idle()
+                    return
+
+                if points.data.size == 0:
+                    ax_pcc_m.set_title("No points after filtering")
+                    canvas_pcc_m.draw_idle()
+                    return
+
+                labels = []
+                data = []
+
+                # For every other channel R, try to plot PCC_{R}_vs_{target}
+                for R in _all_channels_for_pcc:
+                    if R == target:
+                        continue
+                    vals = _get_pcc_values(R, target)
+                    if vals is None:
+                        continue
+                    labels.append(str(R))
+                    data.append(vals)
+
+                if len(data) == 0:
+                    ax_pcc_m.set_title(f"No PCC columns found for target: {target}")
+                    canvas_pcc_m.draw_idle()
+                    return
+
+                xpos = np.arange(len(labels))
+
+                if show_boxes:
+                    ax_pcc_m.boxplot(
+                        data,
+                        positions=xpos,
+                        patch_artist=True,
+                        boxprops=dict(facecolor="lightgray", edgecolor="black"),
+                        medianprops=dict(color="black"),
+                        whiskerprops=dict(color="black"),
+                        capprops=dict(color="black"),
+                    )
+
+                if show_points:
+                    for i, vals in enumerate(data):
+                        jitter = (np.random.rand(len(vals)) - 0.5) * 0.15
+                        ax_pcc_m.scatter(np.full(len(vals), xpos[i]) + jitter, vals, s=12, c="black", zorder=3)
+
+                ax_pcc_m.set_xticks(xpos)
+                ax_pcc_m.set_xticklabels(labels, rotation=20, ha="right")
+                ax_pcc_m.set_ylabel(f"PCC – {target}")
+                ax_pcc_m.set_ylim(-0.2, 1.0)
+                ax_pcc_m.set_title("PCC vs other channels")
+                fig_pcc_m.tight_layout()
+                canvas_pcc_m.draw_idle()
+
+            # Redraw when filtered points change
+            def _on_points_changed_pcc(event=None):
+                try:
+                    cur_tgt = pcc_controls.target.value if hasattr(pcc_controls, "target") else (_all_channels_for_pcc[0] if _all_channels_for_pcc else "")
+                    pcc_controls(target=cur_tgt)  # triggers auto_call
+                except Exception:
+                    pass
+
+            points.events.data.connect(_on_points_changed_pcc)
+
+        else:
+            _remove_dock("PCC (metrics)")
 
     # ---------- export UI ----------
     # ---------- Analysis Plots (Tabbed) ----------
@@ -670,6 +799,15 @@ def show_analysis_results(
         tab_profiles_layout.addWidget(panel_lp)                     # figure canvas panel
         tabs.addTab(tab_profiles, "Radial Profiles")
 
+    # --- Tab 4: PCC (metrics) ---
+    if (pcc_controls is not None) and (panel_pcc_metrics is not None):
+        tab_pcc_m = QWidget()
+        tab_pcc_m_layout = QVBoxLayout(tab_pcc_m)
+        tab_pcc_m_layout.setContentsMargins(6, 6, 6, 6)
+        tab_pcc_m_layout.addWidget(pcc_controls.native)
+        tab_pcc_m_layout.addWidget(panel_pcc_metrics)
+        tabs.addTab(tab_pcc_m, "PCC (metrics)")
+
     # --- Tab 3: Boxplot (controls + canvas) ---
     if (boxplot_controls is not None) and (panel is not None):
         tab_box = QWidget()
@@ -683,8 +821,12 @@ def show_analysis_results(
     if tabs.count() > 0:
         plots_layout.addWidget(tabs)
         viewer.window.add_dock_widget(plots_panel, area="right", name="Analysis Plots")
-        _keep_refs(plots_panel, tabs, radial_controls, radial_line_profiles, panel_lp, boxplot_controls, panel)
-
+        _keep_refs(
+            plots_panel, tabs,
+            radial_controls, radial_line_profiles, panel_lp,
+            boxplot_controls, panel,
+            pcc_controls, panel_pcc_metrics
+        )
 
     if export_csv:
         _remove_dock("Export Filtered Points")
@@ -719,12 +861,12 @@ def show_analysis_results(
             data["frame_tag"]  = [tags_valid[int(i)]  for i in filtered_coords[:, 0]]
 
             # Explicit column order: tag, name, then everything else
-            df = pd.DataFrame(data)
+            df_out = pd.DataFrame(data)
             first_cols = ["frame_tag", "frame_name"]
-            ordered_cols = first_cols + [c for c in df.columns if c not in first_cols]
-            df = df[ordered_cols]
+            ordered_cols = first_cols + [c for c in df_out.columns if c not in first_cols]
+            df_out = df_out[ordered_cols]
 
-            df.to_csv(out_path, index=False)
+            df_out.to_csv(out_path, index=False)
             viewer.status = f"✅ Exported filtered points to: {out_path}"
 
         export_button.changed.connect(_do_export)
