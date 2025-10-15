@@ -269,7 +269,7 @@ def tcell_widget():
     primary = RowState()
     extra_rows: List[FileEdit] = []
     state_by_row: Dict[FileEdit, RowState] = {}
-
+    DEFAULT_WORKERS = 1
     # store filter thresholds picked during “Run Segmentation”
     filter_ranges: Dict[str, tuple] = {}
     chosen_channel_names: List[str] = []
@@ -299,14 +299,14 @@ def tcell_widget():
     @magicgui(
         input_folder={"widget_type": "FileEdit", "mode": "d", "label": "Input Folder"},
         output_folder={"widget_type": "FileEdit", "mode": "d", "label": "Output Folder"},
-        num_workers={"widget_type": "SpinBox", "min": 1, "max": 32, "value": 1},
+        #num_workers={"widget_type": "SpinBox", "min": 1, "max": 32, "value": 1},
         #save_extracted={"widget_type": "CheckBox", "label": "Save extracted cell crops", "value": True},
         
     )
     def form(
         input_folder: Path,
         output_folder: Path,
-        num_workers: int,
+        #num_workers: int,
         #save_extracted: bool,
         seg_model: str,
         seg_diameter: int,
@@ -410,7 +410,7 @@ def tcell_widget():
     ui.append(form.input_folder)
     #ui.append(add_btn)
     #ui.append(extra_box)
-    ui.append(form.num_workers)
+    #ui.append(form.num_workers)
     #ui.append(form.save_extracted)
     ui.append(form.output_folder)
     ui.append(seg_block)
@@ -545,7 +545,8 @@ def tcell_widget():
             viewer.status = "ℹ️ All selected cases already have outputs on disk. Nothing to do."
             return
 
-        n_workers = int(form.num_workers.value)
+        #n_workers = int(form.num_workers.value)
+        n_workers = DEFAULT_WORKERS
 
         @thread_worker
         def _worker():
@@ -638,7 +639,8 @@ def tcell_widget():
             viewer.status = "ℹ️ Everything already processed. Nothing to run."
             return
 
-        n_workers = int(form.num_workers.value)
+        #n_workers = int(form.num_workers.value)
+        n_workers = DEFAULT_WORKERS
 
         # carry the thresholds captured during pilot
         fea_thresh = filter_ranges.copy()

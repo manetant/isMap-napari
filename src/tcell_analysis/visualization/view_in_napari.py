@@ -663,15 +663,7 @@ def show_analysis_results(
         # Helper to fetch PCC values for (ref=R, target=T)
         def _get_pcc_values(R: str, T: str, cond: str) -> np.ndarray | None:
             # build condition mask (all vs specific)
-            print(points.properties.keys())
-            print(f"[DEBUG] Building cond_mask for condition: {cond}")
-            print(points.properties.get("tag", None))
-            print(f"[DEBUG] points.data shape: {points.data.shape}")
-
             if "tag" in points.properties:
-                print(f"[DEBUG] Available tag property with {len(points.properties['tag'])} entries")   
-                print(points.properties['tag'][:10])
-
                 cond_all = np.asarray(points.properties["tag"])
                 cond_mask = cond_all == cond
             else:
@@ -715,9 +707,6 @@ def show_analysis_results(
             ):
                 ax_pcc_m.clear()
 
-                print(f"[DEBUG] PCC controls: target={target}, condition={condition}, show_points={show_points}, show_boxes={show_boxes}")
-                print(_all_channels_for_pcc)
-
                 if not target:
                     ax_pcc_m.set_title("Pick a target channel")
                     canvas_pcc_m.draw_idle()
@@ -738,8 +727,6 @@ def show_analysis_results(
                         continue
                     labels.append(str(R))
                     data.append(vals)
-
-                print(f"[DEBUG] PCC data for target {target}, condition {condition}: {[(labels[i], len(data[i])) for i in range(len(labels))]}")
 
                 if len(data) == 0:
                     ax_pcc_m.set_title(f"No PCC columns for target: {target} (cond: {condition})")
