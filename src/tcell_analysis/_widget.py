@@ -594,7 +594,6 @@ def tcell_widget():
                     on_filter_change=_on_filter_change,
                     show_filter=True,
                     show_boxplot=False,
-                    export_csv=False,
                     show_radial_viewer=False,
                     show_pcc=False,
                 )
@@ -688,7 +687,6 @@ def tcell_widget():
                     on_filter_change=None,
                     show_filter=False,
                     show_boxplot=True,
-                    export_csv=True,
                     show_radial_viewer=True,
                     show_pcc=True,
                 )

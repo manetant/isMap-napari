@@ -29,7 +29,6 @@ def show_analysis_results(
     show_filter: bool = True,
     show_boxplot: bool = True,
     show_pcc: bool = True,
-    export_csv: bool = True,
     show_radial_viewer: bool = True,
 ):
     if initial_ranges is None:
@@ -768,6 +767,54 @@ def show_analysis_results(
         else:
             _remove_dock("PCC (metrics)")
 
+    # ---------- auto-save filtered points to CSV (always) ---------
+
+    _export_path = Path(output_folder) / "filtered_points_export.csv"
+    _export_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _save_filtered_points_to_csv():
+        try:
+            filtered_coords = points.data
+            filtered_props  = points.properties
+
+            # Build dataframe even if no points (write header + empty file)
+            data = {
+                "frame_index": filtered_coords[:, 0] if filtered_coords.size else np.array([], dtype=float),
+                "y": filtered_coords[:, 1] if filtered_coords.size else np.array([], dtype=float),
+                "x": filtered_coords[:, 2] if filtered_coords.size else np.array([], dtype=float),
+            }
+            for prop_name, prop_vals in filtered_props.items():
+                data[prop_name] = prop_vals
+
+            # Names/tags come from current coords’ frame index
+            if filtered_coords.size:
+                data["frame_name"] = [names_valid[int(i)] for i in filtered_coords[:, 0]]
+                data["frame_tag"]  = [tags_valid[int(i)]  for i in filtered_coords[:, 0]]
+            else:
+                data["frame_name"] = []
+                data["frame_tag"]  = []
+
+            df_out = pd.DataFrame(data)
+
+            # Explicit column order: tag, name, then everything else
+            first_cols = ["frame_tag", "frame_name"]
+            ordered_cols = first_cols + [c for c in df_out.columns if c not in first_cols]
+            df_out = df_out.reindex(columns=ordered_cols, fill_value=np.nan)
+
+            df_out.to_csv(str(_export_path), index=False)
+        except Exception as e:
+            # keep UI resilient; just log to napari status
+            viewer.status = f"⚠️ Auto-save CSV failed: {e}"
+
+    # initial save (unfiltered or current filtered state)
+    _save_filtered_points_to_csv()
+
+    # re-save whenever filtering changes the points layer
+    def _on_points_changed_autosave(event=None):
+        _save_filtered_points_to_csv()
+
+    points.events.data.connect(_on_points_changed_autosave)
+
     # ---------- export UI ----------
     # ---------- Analysis Plots (Tabbed) ----------
     # Build one dock with tabs for: Radial Image, Radial Profiles, Boxplot
@@ -833,50 +880,3 @@ def show_analysis_results(
             pcc_controls, panel_pcc_metrics
         )
 
-    if export_csv:
-        _remove_dock("Export Filtered Points")
-
-        default_export_path = Path(output_folder) / "filtered_points_export.csv"
-        default_export_path.parent.mkdir(parents=True, exist_ok=True)
-
-        save_path_picker = FileEdit(label="Save CSV", mode="w", value=str(default_export_path))
-        export_button = PushButton(label="Export CSV")
-
-        def _do_export():
-            if points.data.shape[0] == 0:
-                print("[INFO] No points to export.")
-                return
-
-            out_path = str(save_path_picker.value)
-            if not out_path.endswith(".csv"):
-                out_path += ".csv"
-
-            filtered_coords = points.data
-            filtered_props  = points.properties
-
-            data = {
-                "frame_index": filtered_coords[:, 0],
-                "y": filtered_coords[:, 1],
-                "x": filtered_coords[:, 2],
-            }
-            for prop_name, prop_vals in filtered_props.items():
-                data[prop_name] = prop_vals
-
-            data["frame_name"] = [names_valid[int(i)] for i in filtered_coords[:, 0]]
-            data["frame_tag"]  = [tags_valid[int(i)]  for i in filtered_coords[:, 0]]
-
-            # Explicit column order: tag, name, then everything else
-            df_out = pd.DataFrame(data)
-            first_cols = ["frame_tag", "frame_name"]
-            ordered_cols = first_cols + [c for c in df_out.columns if c not in first_cols]
-            df_out = df_out[ordered_cols]
-
-            df_out.to_csv(out_path, index=False)
-            viewer.status = f"✅ Exported filtered points to: {out_path}"
-
-        export_button.changed.connect(_do_export)
-        export_widget = Container(widgets=[save_path_picker, export_button])
-        viewer.window.add_dock_widget(export_widget, area="right", name="Export Filtered Points")
-
-    else:
-        _remove_dock("Export Filtered Points")
