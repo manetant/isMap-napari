@@ -64,27 +64,32 @@ def read_any_to_cyx(
     save_ome_tiff: bool = False,                  # write combined OME-TIFF with names
     compression: Optional[str] = "zlib",          # or None/"lzma"/"zstd"
     scene_index: Optional[int] = None,
-) -> Tuple[Optional[str], List[str]]:
+) -> Tuple[np.ndarray, Optional[str], List[str]]:
     """
-    Return (combined_tiff_path, final_channel_names).
-    combined_tiff_path is the path to the multi-channel TIFF if written, else None.
+    Load an image and return ONLY the requested channels in the requested order.
+
+    Returns:
+        cyx: np.ndarray (C, Y, X) filtered to desired_order (or all if None)
+        combined_tiff_path: str | None
+        final_names: list[str] names for cyx channels (post-rename), in order
     """
     print(f"Reading {file_path} ...")
 
-    # 1) Quiet and speed up Bio-Formats startup
+    # Quiet bioformats logging
     os.environ["SCIJAVA_LOG_LEVEL"] = "error"
     os.environ["BIOFORMATS_LOG_LEVEL"] = "ERROR"
-    # avoid network checks for jar updates (can look like a hang)
     os.environ["JGO_DISABLE_UPDATE"] = "1"
 
+    # ---- open image
     try:
         img = BioImage(file_path)
-        # get channel names from img
-        detected = img.channel_names
+        # first try BioImage names
+        names_src = list(getattr(img, "channel_names", []) or [])
     except Exception as e:
         logger.error(f"Error reading image data from {file_path}: {e}")
         raise
-    # Validate t_index
+
+    # sizes / coords for validation + fallback name detection
     try:
         xr = img.xarray_data
         nT = xr.sizes.get("T", 1)
@@ -99,36 +104,30 @@ def read_any_to_cyx(
     if scene_index is not None and not (0 <= scene_index < nS):
         raise IndexError(f"scene_index={scene_index} out of range for S={nS}")
 
-    # Pull a single scene → CZYX
+    # ---- get CZYX
     if scene_index is None:
-        czyx = img.get_image_data("CZYX", T=t_index)           # default scene 0
+        czyx = img.get_image_data("CZYX", T=t_index)
     else:
         czyx = img.get_image_data("CZYX", T=t_index, S=scene_index)
 
-    # Detect channel labels
-    detected: Optional[List[str]] = None
-    if xr is not None:
-        try:
-            if "C" in xr.coords and xr.coords["C"].size == xr.sizes["C"]:
+    # ---- robust channel name detection
+    if not names_src or len(names_src) != czyx.shape[0]:
+        # try xarray coord labels
+        if xr is not None and "C" in xr.coords and xr.coords["C"].size == czyx.shape[0]:
+            try:
                 vals = xr.coords["C"].values
-                detected = [str(getattr(v, "item", lambda: v)()) if hasattr(v, "item") else str(v) for v in vals]
-        except Exception:
-            detected = None
-    if not detected:
-        detected = _ome_channel_names_from_tiff(file_path)
+                names_src = [str(getattr(v, "item", lambda: v)()) if hasattr(v, "item") else str(v) for v in vals]
+            except Exception:
+                names_src = []
+    if (not names_src) or (len(names_src) != czyx.shape[0]):
+        # try OME-XML
+        ome_names = _ome_channel_names_from_tiff(file_path)
+        if ome_names and len(ome_names) == czyx.shape[0]:
+            names_src = ome_names
+    if (not names_src) or (len(names_src) != czyx.shape[0]):
+        names_src = [f"C{i}" for i in range(czyx.shape[0])]
 
-    if not detected or len(detected) != czyx.shape[0]:
-        detected = [f"C{i}" for i in range(czyx.shape[0])]
-
-    # Apply renaming rules
-    final_names = detected[:]
-    if channel_map:
-        name_map_norm = {_norm_name(k): v for k, v in channel_map.items()}
-        final_names = [name_map_norm.get(_norm_name(nm), nm) for nm in final_names]
-    if channel_index_map:
-        final_names = [channel_index_map.get(i, nm) for i, nm in enumerate(final_names)]
-
-    # Z collapse -> CYX
+    # ---- Z collapse -> CYX
     if czyx.shape[1] > 1:
         if z_mode == "max":
             cyx = np.nanmax(czyx, axis=1) if np.issubdtype(czyx.dtype, np.floating) else np.max(czyx, axis=1)
@@ -144,20 +143,42 @@ def read_any_to_cyx(
     else:
         cyx = np.squeeze(czyx, axis=1)
 
-    # Reorder (soft)
+    # ---- apply rename maps on SOURCE names
+    final_names = names_src[:]
+    if channel_map:
+        cm_norm = {_norm_name(k): v for k, v in channel_map.items()}
+        final_names = [cm_norm.get(_norm_name(nm), nm) for nm in final_names]
+    if channel_index_map:
+        final_names = [channel_index_map.get(i, nm) for i, nm in enumerate(final_names)]
+
+    # ---- STRICT FILTER + ORDER using desired_order (post-rename)
     if desired_order:
-        norm_to_idx = {_norm_name(nm): i for i, nm in enumerate(final_names)}
         desired_norm = [_norm_name(x) for x in desired_order]
-        first_idxs = [norm_to_idx[nm] for nm in desired_norm if nm in norm_to_idx]
-        missing = [desired_order[i] for i, nm in enumerate(desired_norm) if nm not in norm_to_idx]
+        names_norm = [_norm_name(nm) for nm in final_names]
+
+        idxs = []
+        missing = []
+        for want_nm, want_norm in zip(desired_order, desired_norm):
+            try:
+                idxs.append(names_norm.index(want_norm))
+            except ValueError:
+                missing.append(want_nm)
+
         if missing:
-            logger.warning("desired_order items not found and ignored: %s", missing)
-        keep = (first_idxs + [i for i in range(len(final_names)) if i not in first_idxs]) if first_idxs else list(range(len(final_names)))
-        cyx = cyx[keep]
-        final_names = [final_names[i] for i in keep]
-    
+            logger.warning("desired_order items not found and will be skipped: %s", missing)
+
+        if not idxs:
+            raise ValueError(
+                f"No requested channels found in file. wanted={desired_order}, have={final_names}"
+            )
+
+        cyx = cyx[idxs, ...]
+        final_names = [final_names[i] for i in idxs]
+
+    # standardize dtype (optional)
     cyx = cyx.astype(np.float32, copy=False)
 
+    # ---- write outputs (only filtered set)
     combined_tiff_path = None
     if tiff_output_dir:
         outdir = Path(tiff_output_dir)
@@ -178,12 +199,11 @@ def read_any_to_cyx(
                 compression=compression,
             )
 
-        # combined multi-channel TIFF (optionally OME-TIFF)
+        # combined multi-channel TIFF
         img_basename = os.path.splitext(os.path.basename(file_path))[0]
         combined_tiff_path = os.path.join(tiff_output_dir, f"{img_basename}.tiff")
 
         if save_ome_tiff:
-            # OME axes order "CYX", embed channel names
             tiff.imwrite(
                 combined_tiff_path,
                 cyx,
@@ -202,6 +222,7 @@ def read_any_to_cyx(
             )
 
     return cyx, combined_tiff_path, final_names
+
 
 
 def convert_nd2_to_tiff(nd2_file_path, channel_names, output_dir):
