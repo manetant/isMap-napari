@@ -318,11 +318,11 @@ def tcell_widget():
     seg_header = Label(value="<b>Segmentation Parameters</b> "
                              "<span style='color:#777'>(used only for segmentation)</span>")
     seg_model = ComboBox(label="Model", choices=["cyto3", "cyto2"], value="cyto3")
-    seg_diameter = SpinBox(label="Diameter (px)", min=5, max=2000, value=100, step=1)
+    seg_diameter = SpinBox(label="Diameter (px)", min=5, max=500, value=100, step=1)
     seg_scale = ComboBox(
         label="Scale (×)",
         choices=[f"{x/10:.1f}" for x in range(10, 2, -1)],
-        value="1.0",
+        value="0.7",
         tooltip="Scale applied to segmentation (1.0 = native size)",
     )
 

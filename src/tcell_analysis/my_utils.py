@@ -14,6 +14,20 @@ from .preprocessing.background import (bg_remove_rolling_ball,
 
 logger = logging.getLogger(__name__)
 
+# small helper to resolve seg channel -> index after renaming/reordering
+def _resolve_seg_index(final_names: list[str], seg_channel: Optional[str | int]) -> Optional[int]:
+    if seg_channel is None:
+        return None
+    if isinstance(seg_channel, int):
+        return int(seg_channel) if 0 <= int(seg_channel) < len(final_names) else None
+    # name lookup (case/space tolerant like your _norm_name)
+    want = _norm_name(seg_channel)
+    for i, nm in enumerate(final_names):
+        if _norm_name(nm) == want:
+            return i
+    return None
+
+
 def _norm_name(s: str) -> str:
     # normalize for matching: lowercase, strip spaces, keep alnum/+-_.
     if s is None:
@@ -56,14 +70,19 @@ def _ome_channel_names_from_tiff(path: str) -> Optional[List[str]]:
         return None
 
 def _bg_remove(img: np.ndarray, method: str, radius: int,
-               max_side: Optional[int] = None) -> np.ndarray:
+               max_side: Optional[int] = None,
+               mode: str = "bright") -> np.ndarray:
+    """
+    mode: "bright" (fluorescence) or "dark" (BF/SIRC)
+    """
     method = str(method).lower()
     kwargs = {"radius": radius}
     if max_side is not None:
         kwargs["max_side"] = max_side
 
     if method == "rolling_ball":
-        return bg_remove_rolling_ball(img, **kwargs)
+        # Pass mode into bg_remove_rolling_ball if supported
+        return bg_remove_rolling_ball(img, mode=mode, **kwargs)
     if method == "gaussian":
         return bg_remove_gaussian(img, **kwargs)
     if method == "tophat":
@@ -87,15 +106,17 @@ def read_any_to_cyx(
     bg_method: str = "rolling_ball",
     bg_radius: int = 50,
     bg_max_side: Optional[int] = None, 
-) -> Tuple[np.ndarray, Optional[str], List[str]]:
-    """
-    Load an image and return ONLY the requested channels in the requested order.
+    seg_channel: Optional[str | int] = None, # the channel used for segmentation
+) -> Tuple[np.ndarray, Optional[np.ndarray], Dict[str, Optional[str]], List[str]]:
 
+    '''
     Returns:
-        cyx: np.ndarray (C, Y, X) filtered to desired_order (or all if None)
-        combined_tiff_path: str | None
-        final_names: list[str] names for cyx channels (post-rename), in order
-    """
+        cyx_proc: np.ndarray (C, Y, X)  - processed (BG removed per settings)
+        cyx_raw:  np.ndarray (C, Y, X)  - raw after Z-collapse/reorder/rename
+        out_paths: dict with keys {"raw", "processed"} -> saved TIFF paths (or None)
+        final_names: list[str] for channels, in order
+    '''
+
     print(f"Reading {file_path} ...")
 
     # Quiet bioformats logging
@@ -198,76 +219,93 @@ def read_any_to_cyx(
         cyx = cyx[idxs, ...]
         final_names = [final_names[i] for i in idxs]
 
-    # standardize dtype (optional)
-    cyx = cyx.astype(np.float32, copy=False)
+    cyx_raw = cyx.astype(np.float32, copy=False)
+
+    # Which index is segmentation channel in this final ordering?
+    seg_idx = _resolve_seg_index(final_names, seg_channel)
+    print(f"Segmentation channel: {seg_channel}")
+    print(f"Final channels: {final_names}, seg_idx={seg_idx}")
+
+    # grab raw seg plane only
+    seg_raw = None
+    if seg_idx is not None:
+        seg_raw = cyx_raw[seg_idx].copy()   # keep just the raw 2D plane
+
+
+    # Build processed copy
+    cyx_proc = cyx_raw.copy()
 
     bg_meta = {}
-    # apply bg_removal if desired (optional)
+
     if apply_bg:
-        
+        t0 = time.perf_counter()
+        for ci, ch_name in enumerate(final_names):
+            # default: bright (fluorescence)
+            mode = "bright"
+            if ch_name=='bf' or ch_name=='sirc':
+                mode = "dark"
+
+            cyx_proc[ci] = _bg_remove(
+                cyx_proc[ci],
+                method=bg_method,
+                radius=bg_radius,
+                max_side=bg_max_side,
+                mode=mode,
+            )
+        dt = (time.perf_counter() - t0) * 1000.0
+        logger.info(f"[BG] Applied {bg_method} (r={bg_radius}) to {cyx_proc.shape[0] - (1 if (seg_idx is not None) else 0)} channels in {dt:.1f} ms")
+    else:
+        logger.info("[BG] Skipped background removal; leaving cyx_proc == cyx_raw")
+
+    out_paths: Dict[str, Optional[str]] = {"raw": None, "processed": None}
+    if tiff_output_dir:
+        outdir = Path(tiff_output_dir)
+        outdir.mkdir(parents=True, exist_ok=True)
+
+        img_basename = os.path.splitext(os.path.basename(file_path))[0]
+        base = outdir / img_basename
+
         bg_meta = {
             "BackgroundRemoved": bool(apply_bg),
             "BackgroundMethod": (str(bg_method) if apply_bg else None),
             "BackgroundRadius": (int(bg_radius) if apply_bg else None),
             "BackgroundMaxSide": (int(bg_max_side) if (apply_bg and bg_max_side is not None) else None),
+            "SegChannel": final_names[seg_idx] if seg_idx is not None else None,
         }
-        
-        t0 = time.perf_counter()
-        for ci in range(cyx.shape[0]):
-            cyx[ci] = _bg_remove(
-                cyx[ci],
-                method=bg_method,
-                radius=bg_radius,
-                max_side=bg_max_side,
-            )
-        dt = (time.perf_counter() - t0) * 1000.0
-        logger.info(f"[BG] Applied {bg_method} (r={bg_radius}) to {cyx.shape[0]} channels in {dt:.1f} ms")
 
-    # ---- write outputs (only filtered set)
-    combined_tiff_path = None
-    if tiff_output_dir:
-        outdir = Path(tiff_output_dir)
-        outdir.mkdir(parents=True, exist_ok=True)
+        # RAW
+        raw_path = str(base.with_suffix(".raw.tiff"))
+        tiff.imwrite(
+            raw_path,
+            cyx_raw,
+            ome=bool(save_ome_tiff),
+            metadata=(
+                {"axes": "CYX", "Channel": {"Name": final_names}}
+                if save_ome_tiff else
+                {"axes": "CYX", "channel_names": final_names}
+            ),
+            bigtiff=True,
+            compression=compression,
+        )
+        out_paths["raw"] = raw_path
 
-        # per-channel TIFFs
-        seen = set()
-        for c_idx, cname in enumerate(final_names):
-            safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in str(cname))[:80]
-            while safe in seen:
-                safe += "_dup"
-            seen.add(safe)
-            tiff.imwrite(
-                (outdir / f"{safe}.tiff").as_posix(),
-                cyx[c_idx],
-                photometric="minisblack",
-                bigtiff=True,
-                compression=compression,
-            )
+        # PROCESSED
+        proc_path = str(base.with_suffix(".tiff") if apply_bg else base.with_suffix(".tiff"))
+        tiff.imwrite(
+            proc_path,
+            cyx_proc,
+            ome=bool(save_ome_tiff),
+            metadata=(
+                {"axes": "CYX", "Channel": {"Name": final_names}, **bg_meta}
+                if save_ome_tiff else
+                {"axes": "CYX", "channel_names": final_names, **bg_meta}
+            ),
+            bigtiff=True,
+            compression=compression,
+        )
+        out_paths["processed"] = proc_path
 
-        # combined multi-channel TIFF
-        img_basename = os.path.splitext(os.path.basename(file_path))[0]
-        combined_tiff_path = os.path.join(tiff_output_dir, f"{img_basename}.tiff")
-
-        if save_ome_tiff:
-            tiff.imwrite(
-                combined_tiff_path,
-                cyx,
-                ome=True,
-                metadata={"axes":"CYX","Channel":{"Name":final_names}, **bg_meta},
-                bigtiff=True,
-                compression=compression,
-            )
-        else:
-            tiff.imwrite(
-                combined_tiff_path,
-                cyx,
-                metadata={"axes":"CYX","channel_names":final_names, **bg_meta},
-                bigtiff=True,
-                compression=compression,
-            )
-
-    return cyx, combined_tiff_path, final_names
-
+    return cyx_proc, seg_raw, out_paths, final_names
 
 
 def convert_nd2_to_tiff(nd2_file_path, channel_names, output_dir):

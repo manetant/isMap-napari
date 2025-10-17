@@ -80,6 +80,7 @@ def segment_channel(
             channels=[0, 0],           # 1-channel grayscale
             do_3D=False,
             normalize=True,
+            min_size=500,
         )
 
     # Upsample masks back

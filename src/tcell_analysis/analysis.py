@@ -346,6 +346,7 @@ def _get_2d_channel(crop: np.ndarray, ci: int) -> np.ndarray:
 
 def process_tiff(
         tiff_image, 
+        seg_raw,
         tiff_path, 
         channel_names, 
         output_dir, 
@@ -380,7 +381,7 @@ def process_tiff(
         if seg_channel and seg_channel not in channel_names:
             print(f"[WARN] seg_channel '{seg_channel}' not found in {channel_names}. Using '{seg}'.")
 
-    seg_image = channel_images[seg]
+    seg_image = seg_raw
     seg_model = ("cyto3" if str(seg_model).lower() not in {"cyto2", "cyto3"} else str(seg_model).lower())
     seg_scale = float(np.clip(seg_scale, 0.25, 1.0))
     seg_diameter = int(max(1, seg_diameter))
@@ -393,7 +394,6 @@ def process_tiff(
             model_type=seg_model,
             scale=seg_scale,
         )
-
 
     mask_image = masks[0]
     binary_mask = (mask_image > 0).astype(np.uint8)
@@ -505,8 +505,13 @@ def process_tiff(
                 roi2d = _get_2d_channel(crop, ci)        # (H,W)
                 roi2d = ensure_square(roi2d, AUTO_SQUARE)
                 rad = radial_average_ring(roi2d).astype(np.float32, copy=False)
-                tiff.imwrite(str(rad_dir / f"Cell_{int(lab):05d}_radAv.tif"),
-                             rad)
+                tiff.imwrite(str(rad_dir / f"Cell_{int(lab):05d}_radAv.tif"),rad)
+                # save a PNG too
+                print('DEBUG: Saving radial PNG for Cell', int(lab))
+                png_path = str(rad_dir / f"Cell_{int(lab):05d}_radAv.png")
+                _atomic_write_png((rad / rad.max() * 255).astype(np.uint8, copy=False), png_path)
+
+
         except Exception as e:
             print(f"[WARN] Radial save failed in {rad_dir}: {e}")
 
@@ -622,7 +627,7 @@ def process_image_file(
         print(channel_names)
 
 
-        cyx, tiff_path, channel_names = read_any_to_cyx(
+        cyx, seg_raw, out_paths, channel_names = read_any_to_cyx(
             file_path,
             tiff_output_dir,
             z_mode="max",
@@ -632,22 +637,27 @@ def process_image_file(
             apply_bg=True,
             bg_method="rolling_ball",
             bg_radius=50,
-            bg_max_side=None
+            bg_max_side=None,
+            seg_channel=seg_channel,
         )
+
+        tiff_path = out_paths.get("processed") or out_paths.get("raw")  # prefer processed
+        assert tiff_path, "read_any_to_cyx did not return an output path"
+
         want_bg = {
-            "apply": False,
+            "apply": True,
             "method": None,
-            "radius": None,
+            "radius": 50,
             "max_side": None,
         }
 
         prev_bg = _read_done_bg(tiff_output_dir)
         same_bg = _bg_equal(prev_bg, want_bg)
 
-        print(f"[DEBUG] wrote to {tiff_path}; channels={channel_names}; cyx={cyx.shape}")
 
         results = process_tiff(
             cyx,
+            seg_raw,
             tiff_path,
             channel_names,
             output_folder,
