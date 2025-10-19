@@ -879,6 +879,11 @@ def show_analysis_results(
                     vals = _get_pcc_values(R, target, condition)
                     if vals is None:
                         continue
+                    
+                    vals = np.asarray(vals)
+                    vals = vals[np.isfinite(vals)]
+                    if vals.size == 0:
+                        continue
                     labels.append(str(R))
                     data.append(vals)
 
@@ -908,6 +913,43 @@ def show_analysis_results(
                 fig_pcc_m.tight_layout()
                 canvas_pcc_m.draw_idle()
 
+            # ---- Force a default PCC plot on load (pick a pair that actually has data)
+            try:
+                init_cond, init_tgt = None, None
+
+                # find the first (condition, target) where at least one ref channel has PCC values
+                for cond in cond_choices:
+                    for tgt in _all_channels_for_pcc:
+                        has_data = False
+                        for ref in _all_channels_for_pcc:
+                            if ref == tgt:
+                                continue
+                            vals = _get_pcc_values(ref, tgt, cond)
+                            if vals is not None and np.size(vals) > 0:
+                                has_data = True
+                                break
+                        if has_data:
+                            init_cond, init_tgt = cond, tgt
+                            break
+                    if init_cond:
+                        break
+
+                # fallback if no columns found: use the first entries (plot will show a helpful title)
+                if init_cond is None:
+                    init_cond = cond_choices[0] if cond_choices else ""
+                    init_tgt  = _all_channels_for_pcc[0] if _all_channels_for_pcc else ""
+
+                # set the controls and force one draw (auto_call may not trigger programmatically)
+                if hasattr(pcc_controls, "condition") and init_cond:
+                    pcc_controls.condition.value = init_cond
+                if hasattr(pcc_controls, "target") and init_tgt:
+                    pcc_controls.target.value = init_tgt
+
+                pcc_controls()  # guarantees the first render
+                canvas_pcc_m.draw_idle()
+
+            except Exception as e:
+                viewer.status = f"⚠️ PCC default init failed: {e}"
 
             # Redraw when filtered points change
             def _on_points_changed_pcc(event=None):
