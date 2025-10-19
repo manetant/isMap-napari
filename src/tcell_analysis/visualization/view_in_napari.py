@@ -13,9 +13,101 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from qtpy.QtWidgets import QWidget, QVBoxLayout, QTabWidget, QLabel
 from qtpy.QtWidgets import QPushButton, QFileDialog, QHBoxLayout
-
-
 import re
+
+def reset_tcell_session(viewer):
+    """Remove all layers/docks/figures we added and clear callbacks & refs."""
+    PLUGIN_TAG = "tcell_analysis_layers"
+
+    # 1) Remove layers we created
+    to_rm = []
+    for layer in list(viewer.layers):
+        md = getattr(layer, "metadata", {}) or {}
+        if md.get(PLUGIN_TAG):
+            to_rm.append(layer)
+        # also sweep common names in case tag was lost
+        base = layer.name.split(" [", 1)[0]
+        if base in ("RGB Composite", "Mask Stack", "Cell Labels"):
+            to_rm.append(layer)
+    for l in set(to_rm):
+        try:
+            viewer.layers.remove(l)
+        except Exception:
+            pass
+
+    # 2) Remove our dock widgets (by name or by handle if present)
+    def _rm_dock(nm):
+        try:
+            viewer.window.remove_dock_widget(nm)
+            return
+        except Exception:
+            pass
+        try:
+            d = getattr(viewer.window, "_dock_widgets", {})
+            if nm in d:
+                viewer.window.remove_dock_widget(d[nm])
+        except Exception:
+            pass
+
+    for nm in [
+        "Analysis Plots",
+        "Filter Cells",
+        "Radial Condition Viewer",
+        "Radial Line Controls",
+        "Radial Line Profiles",
+        "Intensity Boxplot",
+        "Boxplot Controls",
+        "PCC (metrics)",
+    ]:
+        _rm_dock(nm)
+
+    # 3) Disconnect any event callbacks we registered on the last run
+    try:
+        for cb in getattr(viewer, "_tcell_points_callbacks", []):
+            try:
+                pts = getattr(viewer, "_tcell_points_layer", None)
+                if pts is not None:
+                    pts.events.data.disconnect(cb)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    setattr(viewer, "_tcell_points_callbacks", [])
+    setattr(viewer, "_tcell_points_layer", None)
+
+    # 4) Close any Matplotlib figures we kept references to
+    try:
+        for obj in list(getattr(viewer, "_tcell_refs", []) or []):
+            try:
+                if hasattr(obj, "figure"):           # e.g., a Canvas
+                    import matplotlib.pyplot as _plt
+                    _plt.close(obj.figure)
+                elif hasattr(obj, "canvas") and hasattr(obj.canvas, "figure"):
+                    import matplotlib.pyplot as _plt
+                    _plt.close(obj.canvas.figure)
+                else:
+                    # direct Figure
+                    from matplotlib.figure import Figure as _Fig
+                    if isinstance(obj, _Fig):
+                        import matplotlib.pyplot as _plt
+                        _plt.close(obj)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    setattr(viewer, "_tcell_refs", [])
+
+    # 5) Clear overlay/status
+    try:
+        viewer.text_overlay.text = ""
+        viewer.text_overlay.visible = False
+    except Exception:
+        pass
+    try:
+        viewer.status = "Session reset."
+    except Exception:
+        pass
+
 
 def show_analysis_results(
     viewer,
@@ -23,8 +115,8 @@ def show_analysis_results(
     channel_names,
     tasks_with_tags,       
     text_feature=None,
-    text_size=11,
-    text_color="yellow",
+    text_size=12,
+    text_color="darkgreen",
     rgb=False,
     initial_ranges=None,         
     on_filter_change=None, 
@@ -36,6 +128,12 @@ def show_analysis_results(
     if initial_ranges is None:
         initial_ranges = {}
 
+    try:
+        reset_tcell_session(viewer)
+    except Exception:
+        # don't block; continue even if cleanup hits a harmless error
+        pass
+    
     # Tag we place on all layers we add so we can clean them up later
     PLUGIN_TAG = "tcell_analysis_layers"
     radial_controls = None
@@ -329,7 +427,11 @@ def show_analysis_results(
     )
 
     points.edge_color = "red"
-    points.text = {"string": texts_list, "size": text_size, "color": text_color, "anchor": "center"}
+    points.text = {"string": texts_list, 
+                   "size": text_size, 
+                   "color": text_color,
+                   "bold": True,
+                   "anchor": "center"}
 
     # add condition per point as a property so we can filter PCC by it
     #_cond_per_point = np.array([tags_valid[int(fi)] for fi in all_coords_np[:, 0]], dtype=object)
@@ -879,7 +981,7 @@ def show_analysis_results(
                     vals = _get_pcc_values(R, target, condition)
                     if vals is None:
                         continue
-                    
+
                     vals = np.asarray(vals)
                     vals = vals[np.isfinite(vals)]
                     if vals.size == 0:
@@ -1070,6 +1172,24 @@ def show_analysis_results(
     if tabs.count() > 0:
         plots_layout.addWidget(tabs)
         viewer.window.add_dock_widget(plots_panel, area="right", name="Analysis Plots")
+
+        try:
+            # Get the last added dock (this one)
+            docks = getattr(viewer.window._qt_window, "dock_widgets", None)
+            if docks and "Analysis Plots" in docks:
+                dock_widget = docks["Analysis Plots"]
+            else:
+                # fallback (for older napari)
+                dock_widget = viewer.window._dock_widgets.get("Analysis Plots", None)
+
+            if dock_widget is not None:
+                # Set a larger preferred initial size (width, height)
+                dock_widget.setMinimumWidth(900)
+                dock_widget.setMinimumHeight(700)
+                dock_widget.resize(900, 700)
+        except Exception as e:
+            viewer.status = f"⚠️ Could not resize Analysis Plots dock: {e}"
+
         _keep_refs(
             plots_panel, tabs,
             radial_controls, radial_line_profiles, panel_lp,
