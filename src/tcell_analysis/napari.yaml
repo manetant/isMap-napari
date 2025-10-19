@@ -1,10 +1,10 @@
 name: predict-tcell
-display_name: PREDICT
+display_name: immunological synapse Map analysis program
 contributions:
   commands:
     - id: predict-tcell.tcell_widget
       python_name: tcell_analysis._widget:tcell_widget
-      title: Run T-Cell Analysis
+      title: Run isMap
   widgets:
     - command: predict-tcell.tcell_widget
-      display_name: T-Cell Analysis
+      display_name: isMap

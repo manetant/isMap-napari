@@ -430,7 +430,7 @@ def tcell_widget():
 
     # mount the dock (left or right as you prefer)
     try:
-        current_viewer().window.add_dock_widget(progress_panel, area="left", name="T-Cell Analysis Progress")
+        current_viewer().window.add_dock_widget(progress_panel, area="left", name="isMap Progress")
     except Exception:
         pass
 

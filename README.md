@@ -1,6 +1,4 @@
-# PREDICT-TCELL
-
-**Personalized Rapid Ex Vivo Determination of Immunotherapeutic Cancer Treatment (PREDICT)**
+# isMap (immunological synapse map analysis program)
 
 This repository provides a **Napari plugin** for analyzing T-cell activation from microscopy images.  
 It integrates **data preprocessing, segmentation, feature extraction, and interactive visualization** in a single workflow.
@@ -84,7 +82,7 @@ You should see:
    napari
    ```
 2. Open the plugin:
-   **Plugins → T-Cell Analysis (PREDICT)**
+   **Plugins → isMap (immunological synapse map analysis program)**
 3. In the docked widget:
    - **Input Folder** → folder with `.nd2` files  
    - **Output Folder** → where results are saved  
