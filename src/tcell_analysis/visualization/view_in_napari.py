@@ -11,7 +11,9 @@ from magicgui import magicgui
 from magicgui.widgets import Container, FileEdit, PushButton
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from qtpy.QtWidgets import QWidget, QVBoxLayout, QTabWidget, QHBoxLayout, QLabel
+from qtpy.QtWidgets import QWidget, QVBoxLayout, QTabWidget, QLabel
+from qtpy.QtWidgets import QPushButton, QFileDialog, QHBoxLayout
+
 
 import re
 
@@ -424,32 +426,19 @@ def show_analysis_results(
         #_remove_dock("Radial Condition Viewer")
         #dock_rcv = viewer.window.add_dock_widget(radial_controls, area="right", name="Radial Condition Viewer")
         #_keep_refs(radial_controls, dock_rcv)
-        
+
         try:
             # ==== Radial Line Profiles (MFI normalized along a diagonal) ====
-            # Uses cond_dirs, radial_channels, tags_valid defined above.
             def _diagonal_profile(img2d: np.ndarray, diagonal: str = "main") -> np.ndarray:
-                """
-                Return 1D MFI along a single diagonal of img2d, normalized by its max.
-                - diagonal="main" -> top-left to bottom-right
-                - diagonal="anti" -> top-right to bottom-left
-                Crops to a centered square first if the image is not square.
-                """
                 if img2d.ndim != 2:
                     raise ValueError("radTotAv image must be 2D")
-
-                # choose which diagonal
                 if diagonal == "anti":
                     img2d = np.fliplr(img2d)
-
-                # crop to centered square so np.diag samples a full-length diagonal
                 H, W = img2d.shape
                 n = min(H, W)
                 y0 = (H - n) // 2
                 x0 = (W - n) // 2
                 sub = img2d[y0:y0 + n, x0:x0 + n]
-
-                # take diagonal and normalize to its own max
                 prof = np.diag(sub).astype(np.float64, copy=False)
                 m = np.nanmax(prof) if prof.size else 0.0
                 return (prof / m) if m > 0 else prof
@@ -457,71 +446,215 @@ def show_analysis_results(
             fig_lp, ax_lp = plt.subplots()
             canvas_lp = FigureCanvas(fig_lp)
 
-            # Multi-select if available; fall back to single-select.
-            try:
-                channels_widget = {"widget_type": "Select", "choices": radial_channels, "multiselect": True, "label": "Channels"}
-            except Exception:
-                channels_widget = {"choices": radial_channels, "label": "Channel"}
+            # Cache profiles to avoid recomputation: {(tag, channel): (x, y)}
+            _profile_cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
+            _legend_map = {}  # legend line -> plotted line
 
-            # --- replace the magicgui function body with this ---
+            def _get_profile(tag: str, ch: str):
+                key = (tag, ch)
+                if key in _profile_cache:
+                    return _profile_cache[key]
+                cdir = cond_dirs.get(tag)
+                if not cdir or not cdir.exists():
+                    return None
+                path = cdir / f"{ch}_radTotAv.tif"
+                if not path.exists():
+                    return None
+                arr = _tiffread(str(path))
+                prof = _diagonal_profile(arr, diagonal="main")
+                if prof.size == 0:
+                    return None
+                x = np.linspace(-1.0, 1.0, len(prof), dtype=float)
+                _profile_cache[key] = (x, prof)
+                return _profile_cache[key]
+
+            def _connect_pickable_legend():
+                # one column, top-right
+                leg = ax_lp.legend(
+                    loc="upper right",     # <- moved to top-right
+                    ncol=1,                # <- single column
+                    fontsize=8,
+                    frameon=True,
+                )
+                for legline, origline in zip(leg.get_lines(), ax_lp.get_lines()):
+                    legline.set_picker(True)
+                    legline.set_pickradius(5)
+                    _legend_map[legline] = origline
+
+                def _on_pick(event):
+                    legline = event.artist
+                    line = _legend_map.get(legline)
+                    if line is None:
+                        return
+                    vis = not line.get_visible()
+                    line.set_visible(vis)
+                    # fade legend item when hidden
+                    legline.set_alpha(1.0 if vis else 0.25)
+                    fig_lp.canvas.draw_idle()
+
+                if not hasattr(fig_lp.canvas, "_legend_pick_connected"):
+                    fig_lp.canvas.mpl_connect("pick_event", _on_pick)
+                    fig_lp.canvas._legend_pick_connected = True
+
+
+            all_tags = sorted(set(tags_valid))
+            all_channels = sorted(set(radial_channels))
+
             @magicgui(
                 auto_call=True,
-                tag={"choices": sorted(set(tags_valid)), "label": "Condition"},
-                channel={"choices": radial_channels, "label": "Channel"}
+                tag={"choices": all_tags, "label": "Condition"},
             )
-            def radial_line_profiles(tag: str = sorted(set(tags_valid))[0] if tags_valid else "N/A",
-                                    channel: str = radial_channels[0] if radial_channels else ""):
+            def radial_line_profiles(tag: str = (all_tags[0] if all_tags else "N/A")):
                 ax_lp.clear()
-                try:
-                    if not channel:
-                        ax_lp.set_title("Pick a channel"); canvas_lp.draw_idle(); return
+                _legend_map.clear()
 
-                    cdir = cond_dirs.get(tag, None)
-                    if not cdir or not cdir.exists():
-                        ax_lp.set_title(f"No res dir for tag: {tag}"); canvas_lp.draw_idle(); return
+                plotted_any = False
+                for ch in all_channels:
+                    xy = _get_profile(tag, ch)
+                    if xy is None:
+                        continue
+                    x, y = xy
+                    ax_lp.plot(x, y, label=str(ch))
+                    plotted_any = True
 
-                    path = cdir / f"{channel}_radTotAv.tif"
-                    if not path.exists():
-                        ax_lp.set_title(f"Missing: {path.name}"); canvas_lp.draw_idle(); return
-
-                    arr = _tiffread(str(path))
-
-                    # single diagonal, already normalized:
-                    prof = _diagonal_profile(arr, diagonal="main")   # or "anti" based on your UI
-
-                    # Plot directly over [-1, 1] across the *existing* diagonal
-                    n = len(prof)
-                    x = np.linspace(-1.0, 1.0, n, dtype=float)
-                    y = prof
-
-                    ax_lp.plot(x, y, label=str(channel))
-                    ax_lp.set_xlim(-1.0, 1.0)
-                    ax_lp.set_ylim(0.0, 1.1)
-                    ax_lp.set_xlabel("Distance from center (A.U.)")
-                    ax_lp.set_ylabel("MFI (normalized)")
-                    ax_lp.legend(loc="upper center", ncol=2, fontsize=8)
-                    ax_lp.set_title(f"Diagonal MFI – {tag} – {channel}")
-
-                except Exception as e:
-                    ax_lp.set_title(f"Error: {e}")
-                finally:
-                    fig_lp.tight_layout()
+                if not plotted_any:
+                    ax_lp.set_title(f"No profiles available for '{tag}'")
                     canvas_lp.draw_idle()
+                    return
 
-            # Put the plot in its own dock under the controls
+                ax_lp.set_xlim(-1.0, 1.0)
+                ax_lp.set_ylim(0.0, 1.1)
+                ax_lp.set_xlabel("Distance from center (A.U.)")
+                ax_lp.set_ylabel("MFI (normalized)")
+                ax_lp.set_title(f"Diagonal MFI — {tag}")
+
+                _connect_pickable_legend()
+                fig_lp.tight_layout()
+                canvas_lp.draw_idle()
+
+            if all_tags:
+                try:
+                    # call once with the first condition to trigger plotting
+                    radial_line_profiles(tag=all_tags[0])
+                except Exception as e:
+                    viewer.status = f"Init radial plot failed: {e}"
+
+
+            # ---- Single panel with canvas, global buttons, and export button
             panel_lp = QWidget()
             lay_lp = QVBoxLayout(panel_lp); lay_lp.setContentsMargins(6, 6, 6, 6)
             lay_lp.addWidget(canvas_lp)
 
-            #_remove_dock("Radial Line Controls")
-            #_remove_dock("Radial Line Profiles")
-            #dock_rlc = viewer.window.add_dock_widget(radial_line_profiles, area="right", name="Radial Line Controls")
-            #dock_rlp = viewer.window.add_dock_widget(panel_lp, area="right", name="Radial Line Profiles")
-            #_keep_refs(radial_line_profiles, panel_lp, fig_lp, ax_lp, canvas_lp, dock_rlc, dock_rlp)
+            # Select all / Clear: toggle line visibility + legend alpha
+            row_sel = QHBoxLayout()
+            btn_all  = QPushButton("Select all")
+            btn_none = QPushButton("Clear")
+            row_sel.addWidget(btn_all)
+            row_sel.addWidget(btn_none)
+            lay_lp.addLayout(row_sel)
+
+            tip_lbl = QLabel("Tip: click legend entries to show/hide channels.")
+            tip_lbl.setWordWrap(True)
+            tip_lbl.setStyleSheet("color: #FFF; font-size: 12px; margin: 4px 0;")
+            lay_lp.addWidget(tip_lbl)
+
+            def _select_all():
+                for line in ax_lp.get_lines():
+                    line.set_visible(True)
+                for legline in _legend_map.keys():
+                    legline.set_alpha(1.0)
+                fig_lp.canvas.draw_idle()
+
+            def _clear_sel():
+                for line in ax_lp.get_lines():
+                    line.set_visible(False)
+                for legline in _legend_map.keys():
+                    legline.set_alpha(0.2)
+                fig_lp.canvas.draw_idle()
+
+            btn_all.clicked.connect(_select_all)
+            btn_none.clicked.connect(_clear_sel)
+
+            # Export all diagonals (all conditions × all channels)
+            row_export = QHBoxLayout()
+            btn_export_all = QPushButton("Export radial profiles (CSV)")
+            row_export.addWidget(btn_export_all)
+            lay_lp.addLayout(row_export)
+
+            # --- Save radial profile as PNG ---
+            row_png = QHBoxLayout()
+            btn_save_radial_png = QPushButton("Save plot as PNG")
+            row_png.addWidget(btn_save_radial_png)
+            lay_lp.addLayout(row_png)
+
+            def _save_radial_png():
+                try:
+                    default_png = str((Path(output_folder) / f"radial_profile_{radial_line_profiles.tag.value}.png"))
+                    parent = getattr(viewer.window, "_qt_window", None)
+                    out, _ = QFileDialog.getSaveFileName(parent, "Save radial profile as PNG", default_png, "PNG (*.png)")
+                    if not out:
+                        return
+                    fig_lp.savefig(out, dpi=300, bbox_inches="tight")
+                    viewer.status = f"Saved radial profile PNG: {out}"
+                except Exception as e:
+                    viewer.status = f"⚠️ Save radial PNG failed: {e}"
+
+            btn_save_radial_png.clicked.connect(_save_radial_png)
+
+            # keep refs so Qt won't GC
+            _keep_refs(btn_save_radial_png)
+            _keep_refs(tip_lbl)
+
+            def _export_all_diagonals_csv():
+                try:
+                    default_csv = str((Path(output_folder) / "all_conditions_all_channels_diagonals.csv"))
+                    parent = getattr(viewer.window, "_qt_window", None)
+                    out, _ = QFileDialog.getSaveFileName(parent, "Save ALL diagonal profiles (CSV)", default_csv, "CSV (*.csv)")
+                    if not out:
+                        return
+
+                    rows = []
+                    for tag in sorted(cond_dirs.keys()):
+                        cdir = cond_dirs.get(tag)
+                        if not cdir or not cdir.exists():
+                            continue
+                        for ch in all_channels:
+                            path = cdir / f"{ch}_radTotAv.tif"
+                            if not path.exists():
+                                continue
+                            try:
+                                arr = _tiffread(str(path))
+                                prof = _diagonal_profile(arr, diagonal="main")
+                                if prof.size == 0:
+                                    continue
+                                x = np.linspace(-1.0, 1.0, len(prof), dtype=float)
+                                rows.extend({
+                                    "condition": str(tag),
+                                    "channel": str(ch),
+                                    "x_norm": float(xi),
+                                    "mfi_norm": float(yi),
+                                } for xi, yi in zip(x, prof))
+                            except Exception as e:
+                                viewer.status = f"⚠️ Skipped {tag}/{ch}: {e}"
+
+                    df_all = pd.DataFrame(rows, columns=["condition", "channel", "x_norm", "mfi_norm"])
+                    if df_all.empty:
+                        viewer.status = "⚠️ No diagonal profiles found to export."
+                        return
+                    df_all.to_csv(out, index=False)
+                    viewer.status = f"Saved all diagonals to: {out}"
+                except Exception as e:
+                    viewer.status = f"⚠️ Export failed: {e}"
+
+            btn_export_all.clicked.connect(_export_all_diagonals_csv)
+
+            # keep refs so Qt won't GC
+            _keep_refs(fig_lp, ax_lp, canvas_lp, btn_all, btn_none, btn_export_all, radial_line_profiles, panel_lp)
 
         except Exception as e:
-            # Don't break the rest of the UI if this feature can't initialize
             viewer.status = f"⚠️ Radial Line Profiles disabled: {e}"
+
+
     
     else:
         _remove_dock("Radial Condition Viewer")   # hide during segmentation/pilot
@@ -748,7 +881,7 @@ def show_analysis_results(
                 ax_pcc_m.set_xticks(xpos)
                 ax_pcc_m.set_xticklabels(labels, rotation=20, ha="right")
                 ax_pcc_m.set_ylabel(f"PCC – {target}")
-                ax_pcc_m.set_ylim(-1.0, 1.0)
+                #ax_pcc_m.set_ylim(-1.0, 1.0)
                 ax_pcc_m.set_title(f"PCC vs other channels — {condition}")
                 fig_pcc_m.tight_layout()
                 canvas_pcc_m.draw_idle()
