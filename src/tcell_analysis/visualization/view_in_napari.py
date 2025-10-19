@@ -583,7 +583,7 @@ def show_analysis_results(
 
             # --- Save radial profile as PNG ---
             row_png = QHBoxLayout()
-            btn_save_radial_png = QPushButton("Save plot as PNG")
+            btn_save_radial_png = QPushButton("Save plot")
             row_png.addWidget(btn_save_radial_png)
             lay_lp.addLayout(row_png)
 
@@ -823,6 +823,28 @@ def show_analysis_results(
             _pcc_layout = QVBoxLayout(panel_pcc_metrics)
             _pcc_layout.setContentsMargins(6, 6, 6, 6)
             _pcc_layout.addWidget(canvas_pcc_m)
+
+            row_pcc_png = QHBoxLayout()
+            btn_save_pcc_png = QPushButton("Save plot")
+            row_pcc_png.addWidget(btn_save_pcc_png)
+            _pcc_layout.addLayout(row_pcc_png)
+
+            def _save_pcc_png():
+                try:
+                    cond = pcc_controls.condition.value if hasattr(pcc_controls, "condition") else "cond"
+                    tgt  = pcc_controls.target.value if hasattr(pcc_controls, "target") else "target"
+                    default_png = str((Path(output_folder) / f"pcc_{cond}_{tgt}.png"))
+                    parent = getattr(viewer.window, "_qt_window", None)
+                    out, _ = QFileDialog.getSaveFileName(parent, "Save PCC plot as PNG", default_png, "PNG (*.png)")
+                    if not out:
+                        return
+                    fig_pcc_m.savefig(out, dpi=300, bbox_inches="tight")
+                    viewer.status = f"Saved PCC PNG: {out}"
+                except Exception as e:
+                    viewer.status = f"⚠️ Save PCC PNG failed: {e}"
+
+            btn_save_pcc_png.clicked.connect(_save_pcc_png)
+            _keep_refs(btn_save_pcc_png)
 
             @magicgui(
                 auto_call=True,
