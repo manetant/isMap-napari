@@ -27,6 +27,8 @@ from .visualization.view_in_napari import show_analysis_results
 from napari import current_viewer
 from .visualization.view_in_napari import reset_tcell_session  # make sure this import is present
 from qtpy.QtWidgets import QLineEdit
+import time
+from qtpy.QtCore import QTimer
 
 
 def _find_sample_image(base: Path) -> Path | None:
@@ -231,6 +233,8 @@ class ProgressPanel(QWidget):
         super().__init__(parent)
         lay = QGridLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
+
+        # Existing widgets
         self.lblOverall = QLabel("Overall: 0 / 0")
         self.pbOverall = QProgressBar()
         self.pbOverall.setMinimum(0); self.pbOverall.setMaximum(100)
@@ -238,32 +242,96 @@ class ProgressPanel(QWidget):
         self.pbCurrent = QProgressBar()
         self.pbCurrent.setMinimum(0); self.pbCurrent.setMaximum(100)
         self.lblTag = QLabel("Tag: –")
-        self.log = QTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMinimumHeight(160)
-        lay.addWidget(self.lblOverall, 0, 0, 1, 2)
-        lay.addWidget(self.pbOverall, 1, 0, 1, 2)
-        lay.addWidget(self.lblCurrent, 2, 0, 1, 2)
-        lay.addWidget(self.pbCurrent, 3, 0, 1, 2)
-        lay.addWidget(self.lblTag, 4, 0, 1, 2)
-        lay.addWidget(self.log, 5, 0, 1, 2)
+        self.log = QTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(160)
 
+        # NEW: elapsed time labels
+        self.lblElapsedOverall = QLabel("Elapsed (overall): 00:00:00")
+
+        # Layout
+        lay.addWidget(self.lblOverall,         0, 0, 1, 2)
+        lay.addWidget(self.pbOverall,          1, 0, 1, 2)
+        lay.addWidget(self.lblCurrent,         2, 0, 1, 2)
+        lay.addWidget(self.pbCurrent,          3, 0, 1, 2)
+        lay.addWidget(self.lblTag,             4, 0, 1, 2)
+        lay.addWidget(self.lblElapsedOverall,  5, 0, 1, 2)
+        lay.addWidget(self.log,                7, 0, 1, 2)
+
+        # Timing state
+        self._overall_start = None   # type: float | None
+        self._running = False
+
+        # Tick every second to refresh labels
+        self._tick = QTimer(self)
+        self._tick.timeout.connect(self._on_tick)
+        self._tick.start(1000)
+
+    # ---- public API used by your bridge callbacks ----
     def set_total(self, done, total):
-        pct = 0 if total == 0 else int(100 * done / total)
-        self.pbOverall.setValue(pct)
-        self.lblOverall.setText(f"Overall: {done} / {total}")
+        # when a batch starts (done==0), start overall timer
+        if total > 0:
+            pct = 0 if total == 0 else int(100 * done / total)
+            self.pbOverall.setValue(pct)
+            self.lblOverall.setText(f"Overall: {done} / {total}")
+        if done == 0 and total > 0 and not self._running:
+            self._overall_start = time.monotonic()
+            self._running = True
+            self._update_elapsed_labels(force=True)
+        if total > 0 and done >= total:
+            # batch finished
+            self._running = False
+            self._update_elapsed_labels(force=True)
 
     def set_file(self, done, total):
-        pct = 0 if total == 0 else int(100 * done / total)
+        pct = 0 if total == 0 else int(100 * done / max(total, 1))
         self.pbCurrent.setValue(pct)
+        # keep current elapsed updating via timer
 
     def set_now(self, path, tag):
-        self.lblCurrent.setText(f"Current: {Path(path).name}")
-        self.lblTag.setText(f"Tag: {tag}")
+        # called at the start of each case → reset "current" timer
+        self.lblCurrent.setText(f"Current: {Path(path).name if path else '–'}")
+        self.lblTag.setText(f"Tag: {tag if tag else '–'}")
+        self._current_start = time.monotonic()
+        self._update_elapsed_labels(force=True)
 
     def append(self, msg):
         self.log.append(msg)
         self.log.ensureCursorVisible()
+
+    def mark_finished(self):
+        self._running = False
+        self._update_elapsed_labels(force=True)
+
+    # ---- helpers ----
+    def _format_hms(self, seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        s = seconds % 60
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def _update_elapsed_labels(self, force: bool = False):
+        now = time.monotonic()
+        # overall
+        if self._overall_start is not None:
+            overall_sec = (now - self._overall_start) if self._running else (self._last_overall() or 0)
+            self.lblElapsedOverall.setText(f"Elapsed (overall): {self._format_hms(overall_sec)}")
+        else:
+            self.lblElapsedOverall.setText("Elapsed (overall): 00:00:00")
+
+    def _on_tick(self):
+        # update every second while running
+        if self._running:
+            self._update_elapsed_labels()
+
+    def _last_overall(self):
+        if self._overall_start is None:
+            return 0
+        return time.monotonic() - self._overall_start
+
+    def _last_current(self):
+        if self._current_start is None:
+            return 0
+        return time.monotonic() - self._current_start
 
 
 def tcell_widget():
@@ -460,6 +528,8 @@ def tcell_widget():
     bridge.file_changed.connect(progress_panel.set_file)
     bridge.now_processing.connect(progress_panel.set_now)
     bridge.log_line.connect(progress_panel.append)
+    
+    bridge.finished.connect(progress_panel.mark_finished)
 
     # mount the dock (left or right as you prefer)
     try:
