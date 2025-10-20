@@ -24,7 +24,9 @@ from qtpy.QtWidgets import QProgressBar, QTextEdit, QGridLayout, QLabel
 
 from .analysis import run_analysis
 from .visualization.view_in_napari import show_analysis_results
-
+from napari import current_viewer
+from .visualization.view_in_napari import reset_tcell_session  # make sure this import is present
+from qtpy.QtWidgets import QLineEdit
 
 
 def _find_sample_image(base: Path) -> Path | None:
@@ -405,6 +407,35 @@ def tcell_widget():
     # ---------- BUILD UI ORDER ----------
     run_seg_btn = PushButton(label="Run Segmentation")
     run_all_btn = PushButton(label="Run Analysis")
+    reset_btn   = PushButton(label="Reset session")
+
+    # Make it look dangerous and distinct
+    try:
+        _qbtn = reset_btn.native  # this is a Qt QPushButton
+        _qbtn.setToolTip("Reset everything in the viewer and widget state.")
+        _qbtn.setMinimumWidth(160)
+        _qbtn.setStyleSheet("""
+            QPushButton {
+                background: #fff5f5;
+                color: #b00020;
+                border: 1px solid #b00020;
+                border-radius: 8px;
+                padding: 6px 10px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #ffecec;
+            }
+            QPushButton:pressed {
+                background: #ffdede;
+            }
+            QPushButton:focus {
+                outline: none;
+                border: 2px solid #b00020;
+            }
+        """)
+    except Exception:
+        pass
 
     ui = Container(layout="vertical", labels=True)
     ui.append(form.input_folder)
@@ -414,8 +445,10 @@ def tcell_widget():
     #ui.append(form.save_extracted)
     ui.append(form.output_folder)
     ui.append(seg_block)
-    ui.append(run_seg_btn)   # first stage
-    ui.append(run_all_btn)   # second stage
+    ui.append(run_seg_btn) 
+    ui.append(run_all_btn) 
+    ui.append(Label(value="<hr>"))
+    ui.append(reset_btn)
 
 
     # ---- Progress dock (one per widget) ----
@@ -433,6 +466,109 @@ def tcell_widget():
         current_viewer().window.add_dock_widget(progress_panel, area="left", name="isMap Progress")
     except Exception:
         pass
+
+    def _clear_fileedit(fe):
+        """Hard-clear a magicgui FileEdit: value + visible text, safely."""
+        try:
+            # stop event cascades (e.g., your _on_primary_changed auto-fill)
+            fe.native.blockSignals(True)
+        except Exception:
+            pass
+
+        try:
+            # clear value first
+            fe.value = None
+        except Exception:
+            pass
+
+        # clear any line edits inside (covers .line_edit, ._line_edit, etc.)
+        try:
+            for le in fe.native.findChildren(QLineEdit):
+                le.clear()
+        except Exception:
+            pass
+
+        # best-effort on common attribute
+        try:
+            if hasattr(fe, "line_edit") and fe.line_edit is not None:
+                fe.line_edit.setText("")
+        except Exception:
+            pass
+
+        try:
+            fe.native.blockSignals(False)
+        except Exception:
+            pass
+
+
+    @reset_btn.changed.connect
+    def _reset_session(_=None):
+        viewer = current_viewer()
+        if viewer is None:
+            return
+
+        # (optional) confirmation dialog here if you added it
+
+        # --- temporarily disconnect the auto-fill so it won't repopulate output_folder
+        disconnected = False
+        try:
+            form.input_folder.changed.disconnect(_on_primary_changed)
+            disconnected = True
+        except Exception:
+            pass
+
+        # --- deep clean napari (keep progress dock as discussed)
+        try:
+            reset_tcell_session(viewer)  # or reset_tcell_session(viewer, remove_progress=False)
+        except Exception:
+            pass
+
+        # --- clear widget state
+        filter_ranges.clear()
+        chosen_channel_names.clear()
+        nonlocal chosen_seg_channel; chosen_seg_channel = None
+        chosen_channel_map.clear()
+        primary.tag = ""; primary.tagged_path = ""
+        primary.conditions_by_subfolder.clear(); primary.conditions_for_path = ""
+
+        # --- clear file pickers (both value & visible text), with signals blocked
+        try:
+            _clear_fileedit(form.input_folder)
+        except Exception:
+            pass
+        try:
+            _clear_fileedit(form.output_folder)
+        except Exception:
+            pass
+
+        # --- reset segmentation parameter widgets
+        try:
+            seg_model.value = "cyto3"
+            seg_diameter.value = 100
+            seg_scale.value = "0.7"
+        except Exception:
+            pass
+
+        # --- reconnect the auto-fill handler
+        if disconnected:
+            try:
+                form.input_folder.changed.connect(_on_primary_changed)
+            except Exception:
+                pass
+
+        # --- clear progress panel but keep it visible
+        try:
+            progress_panel.set_total(0, 0)
+            progress_panel.set_file(0, 0)
+            progress_panel.set_now("", "")
+            progress_panel.log.clear()
+        except Exception:
+            pass
+
+        try:
+            viewer.status = "🔄 Session reset. Input/Output folders cleared."
+        except Exception:
+            pass
 
     # ---------- GATHER ALL CASES (utility) ----------
     '''

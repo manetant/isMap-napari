@@ -58,6 +58,7 @@ def reset_tcell_session(viewer):
         "Intensity Boxplot",
         "Boxplot Controls",
         "PCC (metrics)",
+        #"isMap Progress",
     ]:
         _rm_dock(nm)
 
