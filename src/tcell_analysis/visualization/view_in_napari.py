@@ -1167,7 +1167,7 @@ def show_analysis_results(
         tab_box_layout.setContentsMargins(6, 6, 6, 6)
         tab_box_layout.addWidget(boxplot_controls.native)  # controls
         tab_box_layout.addWidget(panel)                    # figure canvas panel
-        tabs.addTab(tab_box, "Boxplot")
+        tabs.addTab(tab_box, "MFI")
 
     # Only add the dock if at least one tab exists
     if tabs.count() > 0:
