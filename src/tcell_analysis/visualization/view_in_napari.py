@@ -43,7 +43,7 @@ def reset_tcell_session(viewer):
         except Exception:
             pass
         try:
-            d = getattr(viewer.window, "_dock_widgets", {})
+            d = getattr(viewer.window, "_wrapped_dock_widgets", {})
             if nm in d:
                 viewer.window.remove_dock_widget(d[nm])
         except Exception:
@@ -192,8 +192,9 @@ def show_analysis_results(
         except Exception:
             pass
         # fallback: look into private registry if present
+        
         try:
-            d = getattr(viewer.window, "_dock_widgets", {})
+            d = getattr(viewer.window, "_wrapped_dock_widgets", {})
             if isinstance(name_or_widget, str) and name_or_widget in d:
                 viewer.window.remove_dock_widget(d[name_or_widget])
         except Exception:
@@ -422,7 +423,7 @@ def show_analysis_results(
         all_coords_np,
         name="Cell Labels",
         size=5,
-        face_color="none",
+        face_color="transparent",
         properties=all_properties,
         metadata={PLUGIN_TAG: True},
     )
@@ -1175,16 +1176,12 @@ def show_analysis_results(
         viewer.window.add_dock_widget(plots_panel, area="right", name="Analysis Plots")
 
         try:
-            # Get the last added dock (this one)
-            docks = getattr(viewer.window._qt_window, "dock_widgets", None)
-            if docks and "Analysis Plots" in docks:
-                dock_widget = docks["Analysis Plots"]
-            else:
-                # fallback (for older napari)
-                dock_widget = viewer.window._dock_widgets.get("Analysis Plots", None)
+            # Use the public mapping of dock widgets
+            docks = getattr(viewer.window, "dock_widgets", {})
+            dock_widget = docks.get("Analysis Plots", None)
 
             if dock_widget is not None:
-                # Set a larger preferred initial size (width, height)
+                # These generally work on the dock widget itself
                 dock_widget.setMinimumWidth(900)
                 dock_widget.setMinimumHeight(700)
                 dock_widget.resize(900, 700)
@@ -1197,4 +1194,3 @@ def show_analysis_results(
             boxplot_controls, panel,
             pcc_controls, panel_pcc_metrics
         )
-
