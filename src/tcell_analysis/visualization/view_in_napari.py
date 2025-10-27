@@ -829,9 +829,29 @@ def show_analysis_results(
             if default_metric is None:
                 default_metric = mean_intensity_metrics[0]
 
-        def _plot_box(metric: str | None):
+        def _pick_series(metric: str, normalized: bool) -> tuple[str, np.ndarray] | None:
+            """
+            Return (label, data_vector) taken from points.properties for 'metric'.
+            If normalized=True and a '<metric>_norm' column exists, use it; else None.
+            """
+            if not metric:
+                return None
+            if not normalized:
+                vals = points.properties.get(metric, None)
+                if vals is None:
+                    return None
+                return (metric, np.asarray(vals))
+            
+            # try normalized version
+            norm_col = f"{metric}_bg_norm"
+            vals = points.properties.get(norm_col, None)
+            if vals is None:
+                return None
+            return (norm_col, np.asarray(vals))
+
+        def _plot_box(metric: str | None, normalized: bool):
             ax.clear()
-            if metric is None or metric not in points.properties:
+            if metric is None or (metric not in points.properties and f"{metric}_norm" not in points.properties):
                 ax.set_title("No mean-intensity metric found")
                 canvas.draw_idle()
                 return
@@ -841,15 +861,28 @@ def show_analysis_results(
                 ax.set_title("No points after filtering")
                 canvas.draw_idle()
                 return
-
+            
+            picked = _pick_series(metric, normalized)
+            if picked is None:
+                if normalized:
+                    ax.set_title(f"No normalized data for '{metric}'")
+                else:
+                    ax.set_title(f"No data for '{metric}'")
+                canvas.draw_idle()
+                return
+            
+            colname, intens_all = picked
             frame_idx = coords[:, 0].astype(int)
-            intens = np.asarray(points.properties[metric])
             groups = [tags_valid[i] for i in frame_idx]
 
-            df_plot = pd.DataFrame({"Group": groups, metric: intens})
+            df_plot = pd.DataFrame({"Group": groups, colname: intens_all})
             buckets, labels = [], []
             for tag, g in df_plot.groupby("Group", sort=True):
-                buckets.append(g[metric].values)
+                # keep only finite
+                v = pd.to_numeric(g[colname], errors="coerce").dropna().values
+                if v.size == 0:
+                    continue
+                buckets.append(v)
                 labels.append(str(tag))
 
             if len(buckets) == 0:
@@ -857,33 +890,43 @@ def show_analysis_results(
                 canvas.draw_idle()
                 return
 
-            ax.boxplot(buckets, labels=labels, showfliers=True)
-            ax.set_xlabel("Group")
-            ax.set_ylabel(metric)
-            ax.set_title(f"{metric} by Group")
+            ax.boxplot(
+                buckets, 
+                labels=labels,
+                widths=0.6,
+                patch_artist=True,
+                boxprops=dict(facecolor="lightgray", edgecolor="black"),
+                medianprops=dict(color="black"),
+                whiskerprops=dict(color="black"),
+                capprops=dict(color="black"),
+                showfliers=True)
+            
+            ax.set_xlabel("Condition")
+            ax.set_ylabel(metric + (" (a.u.)" if not normalized else " (normalized)"))
+            title = (metric if not normalized else f"{metric} (normalized)")
+            ax.set_title(f"{title} by condition")
             for lab in ax.get_xticklabels():
                 lab.set_rotation(20)
                 lab.set_ha("right")
             fig.tight_layout()
             canvas.draw_idle()
 
-        @magicgui(auto_call=True, metric={"label": "Metric", "choices": mean_intensity_metrics, "value": default_metric})
-        def boxplot_controls(metric: str = default_metric):
-            _plot_box(metric)
+        @magicgui(
+            auto_call=True,
+            metric={"label": "Metric", "choices": mean_intensity_metrics, "value": default_metric},
+            normalized={"widget_type": "CheckBox", "label": "Show normalized", "value": False},
+        )
+        def boxplot_controls(metric: str = default_metric, normalized: bool = False):
+            _plot_box(metric, normalized)
 
         def _on_points_changed(event=None):
-            cur = boxplot_controls.metric.value if hasattr(boxplot_controls, "metric") else default_metric
-            _plot_box(cur)
+            cur_m = boxplot_controls.metric.value if hasattr(boxplot_controls, "metric") else default_metric
+            cur_n = bool(boxplot_controls.normalized.value) if hasattr(boxplot_controls, "normalized") else False
+            _plot_box(cur_m, cur_n)
 
         points.events.data.connect(_on_points_changed)
-        _plot_box(default_metric)
+        _plot_box(default_metric, False)  # default: raw (not normalized
 
-        #_remove_dock("Intensity Boxplot")
-        #_remove_dock("Boxplot Controls")
-        #dock_bp = viewer.window.add_dock_widget(panel, area="right", name="Intensity Boxplot")
-        #dock_bpc = viewer.window.add_dock_widget(boxplot_controls, area="right", name="Boxplot Controls")
-        #_keep_refs(panel, canvas, fig, ax, boxplot_controls, dock_bp, dock_bpc)
-    
     else:
         _remove_dock("Intensity Boxplot") 
         _remove_dock("Boxplot Controls")

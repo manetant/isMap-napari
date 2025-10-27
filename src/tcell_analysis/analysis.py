@@ -419,6 +419,40 @@ def process_tiff(
     if not isinstance(features_df, pd.DataFrame):
         features_df = pd.DataFrame(features_df)
 
+    # background normalization (per frame, per channel)
+    # compute mean outside cells for each channel
+    bg_means: dict[str, float] = {}
+    try:
+        outside = (mask_image == 0)
+        if outside.size == 0 or np.count_nonzero(outside) == 0:
+            outside = None
+
+        for ch_name, ch_img in channel_images.items():
+            if outside is None:
+                bg = float("nan")
+            else:
+                vals = ch_img[outside]
+                vals = vals[np.isfinite(vals)]
+                bg = float(vals.mean()) if len(vals) > 0 else float("nan")
+            bg_means[ch_name] = bg
+
+        # attach per-cell columns: one bg mean per row (repeat) + normalized mean if raw column present
+        if len(features_df):
+            for ch_name, bg in bg_means.items():
+                # add the bg mean used (one value repeated for this frame
+                features_df[f"{ch_name}_frame_bg_mean"] = bg
+
+                # if we have a raw mean column, add a normalized mean column
+                raw_col = f"{ch_name}_mean_intensity"
+                norm_col = f"{ch_name}_mean_intensity_bg_norm"
+                if raw_col in features_df.columns:
+                    if bg is not None and np.isfinite(bg) and bg > 0:
+                        features_df[norm_col] = features_df[raw_col] / bg
+                    else:
+                        features_df[norm_col] = np.nan
+    except Exception as e:
+        print(f"[WARN] Background normalization failed for frame '{tag}' and channel '{ch_name}': {e}")
+
     # ---------------- APPLY THRESHOLDS (if any) ----------------
     # Keep only rows within all provided ranges, and derive the label subset.
     selected_label_set = set(int(l) for l in valid_labels)  # default = keep all
