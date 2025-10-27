@@ -449,7 +449,7 @@ def show_analysis_results(
         else:
             idx = 0
         idx = max(0, min(idx, len(names_valid) - 1))
-        n_cells = int((mask_stack[idx] > 0).sum())
+        n_cells = len(dfs_valid[idx])
         seg_name = seg_names_valid[idx] if idx < len(seg_names_valid) else "N/A"
         viewer.text_overlay.text = (
             f"Frame: {names_valid[idx]} | Group: {tags_valid[idx]} | Cells: {n_cells} | Seg: {seg_name}"
