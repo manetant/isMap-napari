@@ -29,7 +29,36 @@ from .visualization.view_in_napari import reset_tcell_session  # make sure this 
 from qtpy.QtWidgets import QLineEdit
 import time
 from qtpy.QtCore import QTimer
+from qtpy.QtGui import QPixmap
+from qtpy.QtCore import Qt
 
+
+def wrap_form_with_logo(base_form_native, logo_path: Path, width_px: int = 600) -> QWidget:
+    """
+    Returns a QWidget that shows a centered logo on top and your form under it.
+    Does NOT dock anything (napari will dock the returned widget).
+    """
+    host = QWidget()
+    lay = QVBoxLayout(host)
+    lay.setContentsMargins(6, 6, 6, 6)
+    lay.setSpacing(8)
+
+    logo_lbl = QLabel()
+    logo_lbl.setAlignment(Qt.AlignCenter)
+    logo_lbl.setStyleSheet("background: transparent;")
+    pix = QPixmap(str(logo_path))
+    if not pix.isNull():
+        logo_lbl.setPixmap(pix.scaledToWidth(width_px, Qt.SmoothTransformation))
+    else:
+        logo_lbl.setText("⚠️ Logo not found")
+
+    lay.addWidget(logo_lbl)
+    lay.addWidget(base_form_native)
+
+    # give the dock a comfy default size
+    host.setMinimumWidth(600)
+    host.setMinimumHeight(222)
+    return host
 
 def _find_sample_image(base: Path) -> Path | None:
     # search inside base for a single image we can open to detect channels
@@ -373,6 +402,7 @@ def tcell_widget():
         #save_extracted={"widget_type": "CheckBox", "label": "Save extracted cell crops", "value": True},
         
     )
+
     def form(
         input_folder: Path,
         output_folder: Path,
@@ -420,57 +450,6 @@ def tcell_widget():
                 primary.tag = t or ""
                 primary.tagged_path = cur
             primary.conditions_by_subfolder.clear(); primary.conditions_for_path = ""
-    '''
-    # ---------- EXTRA INPUTS ----------
-    add_btn = PushButton(label="+ Add input")
-    extra_box = Container(layout="vertical", labels=True, scrollable=False)
-    extra_box.native.setMaximumHeight(220)
-
-    def _make_extra_row():
-        fe = FileEdit(mode="d", label="Input Folder", value=None)
-        fe.native.setMinimumWidth(420)
-        st = RowState()
-        state_by_row[fe] = st
-
-        @fe.changed.connect
-        def _on_extra(_=None):
-            cur = str(fe.value or "")
-            if not cur:
-                return
-            if not form.output_folder.value:
-                form.output_folder.value = Path(cur) / "tcell-results"
-            subs = _iter_immediate_subfolders(Path(cur))
-            if subs:
-                st.conditions_by_subfolder = _ask_conditions_for_subfolders(fe, Path(cur), st.conditions_by_subfolder if st.conditions_for_path == cur else None)
-                st.conditions_for_path = cur
-                st.tag = ""; st.tagged_path = ""
-            else:
-                if st.tagged_path != cur:
-                    default = Path(cur).name
-                    t = _prompt_text(fe, "Tag this input", f"Enter a tag for “{default}”:", default)
-                    st.tag = t or ""
-                    st.tagged_path = cur
-                st.conditions_by_subfolder.clear(); st.conditions_for_path = ""
-
-        row = Container(layout="horizontal", labels=False)
-        row.append(Label(value=f"Extra Input {len(extra_rows)+1}"))
-        row.append(fe)
-        extra_rows.append(fe)
-        extra_box.append(row)
-
-        if len(extra_rows) == 1 and not extra_box.scrollable:
-            extra_box.scrollable = True
-
-        for w in (extra_box.native,):
-            if w.layout() is not None:
-                w.layout().activate()
-            w.updateGeometry()
-        QApplication.processEvents()
-
-    @add_btn.changed.connect
-    def _on_add(_=None):
-        _make_extra_row()
-    '''
 
     # ---------- BUILD UI ORDER ----------
     run_seg_btn = PushButton(label="Run Segmentation")
@@ -857,7 +836,10 @@ def tcell_widget():
 
         w = _worker(); w.returned.connect(_done); w.errored.connect(_err); w.start()
 
-    return ui
+    logo_path = Path(__file__).parent.parent.parent / "logo_isMap.png" 
+
+    host = wrap_form_with_logo(ui.native, logo_path)
+    return host
 
 
 __all__ = ["tcell_widget"]
