@@ -773,6 +773,39 @@ def show_analysis_results(
         circ_all = np.asarray(all_properties.get("circularity", np.array([])), dtype=float)
         diam_all = np.asarray(all_properties.get("equivalent_diameter", np.array([])), dtype=float)
 
+        @magicgui(
+            auto_call=True,
+            # IMPORTANT: use FloatRangeSlider for floats; RangeSlider remains for ints
+            circularity={"widget_type": "FloatRangeSlider", "min": 0.0, "max": 1.0, "step": 0.1, "value": c_rng, "label": "circularity"},
+            diameter={"widget_type": "RangeSlider", "min": 0, "max": 200, "step": 10, "value": d_rng, "label": "equivalent_diameter"},
+        )    
+        def filter_points(circularity, diameter):
+            circ = all_properties.get("circularity")
+            diam = all_properties.get("equivalent_diameter")
+            if circ is None or diam is None:
+                print("[WARNING] Missing properties for filter.")
+                return
+
+            cmin, cmax = circularity
+            dmin, dmax = diameter
+            mask = (
+                (circ >= cmin) & (circ <= cmax) &
+                (diam >= dmin) & (diam <= dmax)
+            )
+
+            idx = np.nonzero(mask)[0]
+            points.data         = all_coords_np[mask]
+            points.text.values  = [texts_list[i] for i in idx]
+            points.properties   = {k: v[mask] for k, v in all_properties.items()}
+
+            # NEW: bubble up the current ranges so the widget can remember them
+            if callable(on_filter_change):
+                on_filter_change({
+                    "circularity": (float(cmin), float(cmax)),
+                    "equivalent_diameter": (float(dmin), float(dmax)),
+                })
+
+
         # ---- Histograms (static) ----
         # Circularity
         fig_circ, ax_circ = plt.subplots(figsize=(4.6, 2.2))
@@ -810,51 +843,19 @@ def show_analysis_results(
             fig_diam.tight_layout()
             canvas_diam.draw_idle()
 
-        @magicgui(
-            auto_call=True,
-            # IMPORTANT: use FloatRangeSlider for floats; RangeSlider remains for ints
-            circularity={"widget_type": "FloatRangeSlider", "min": 0.0, "max": 1.0, "step": 0.1, "value": c_rng, "label": "circularity"},
-            diameter={"widget_type": "RangeSlider", "min": 0, "max": 200, "step": 10, "value": d_rng, "label": "equivalent_diameter"},
-        )    
-        def filter_points(circularity, diameter):
-            circ = all_properties.get("circularity")
-            diam = all_properties.get("equivalent_diameter")
-            if circ is None or diam is None:
-                print("[WARNING] Missing properties for filter.")
-                return
-
-            cmin, cmax = circularity
-            dmin, dmax = diameter
-            mask = (
-                (circ >= cmin) & (circ <= cmax) &
-                (diam >= dmin) & (diam <= dmax)
-            )
-
-            idx = np.nonzero(mask)[0]
-            points.data         = all_coords_np[mask]
-            points.text.values  = [texts_list[i] for i in idx]
-            points.properties   = {k: v[mask] for k, v in all_properties.items()}
-
-            # NEW: bubble up the current ranges so the widget can remember them
-            if callable(on_filter_change):
-                on_filter_change({
-                    "circularity": (float(cmin), float(cmax)),
-                    "equivalent_diameter": (float(dmin), float(dmax)),
-                })
-
-        # ---- Compose a panel: histograms on top, sliders under them ----
+        # ---- Compose a panel: sliders first, histograms below ----
         _remove_dock("Filter Cells")
         filter_panel = QWidget()
         _filter_layout = QVBoxLayout(filter_panel)
         _filter_layout.setContentsMargins(6, 6, 6, 6)
 
-        lbl_hint = QLabel("Distributions (all cells). Dashed lines mark initial ranges.")
+        lbl_hint = QLabel("Below are distributions of all cells. Dashed lines mark initial ranges.")
         lbl_hint.setWordWrap(True)
 
+        _filter_layout.addWidget(filter_points.native)  # sliders on top
         _filter_layout.addWidget(lbl_hint)
         _filter_layout.addWidget(canvas_circ)
         _filter_layout.addWidget(canvas_diam)
-        _filter_layout.addWidget(filter_points.native)
 
         viewer.window.add_dock_widget(filter_panel, area="right", name="Filter Cells")
 
@@ -1332,8 +1333,8 @@ def show_analysis_results(
             if dock_widget is not None:
                 # These generally work on the dock widget itself
                 dock_widget.setMinimumWidth(600)
-                dock_widget.setMinimumHeight(550)
-                dock_widget.resize(600, 550)
+                dock_widget.setMinimumHeight(560)
+                dock_widget.resize(600, 560)
         except Exception as e:
             viewer.status = f"⚠️ Could not resize Analysis Plots dock: {e}"
 
