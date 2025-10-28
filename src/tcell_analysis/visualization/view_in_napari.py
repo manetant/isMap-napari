@@ -459,6 +459,7 @@ def show_analysis_results(
         viewer.text_overlay.text = (
             f"Frame: {names_valid[idx]} | Group: {tags_valid[idx]} | Cells: {n_cells} | Seg: {seg_name}"
         )
+        viewer.text_overlay.font_size = 16
 
     viewer.dims.events.current_step.connect(_update_overlay)
     _update_overlay()
@@ -661,8 +662,7 @@ def show_analysis_results(
             if all_tags:
                 try:
                     # call once with the first condition to trigger plotting
-                    default_x_mode = "Micrometers (µm)" if (um_per_px is not None) else "Normalized (-1..1)"
-                    radial_line_profiles(tag=all_tags[0], x_mode=default_x_mode)
+                    radial_line_profiles(tag=all_tags[0])
                 except Exception as e:
                     viewer.status = f"Init radial plot failed: {e}"
 
@@ -810,8 +810,8 @@ def show_analysis_results(
         @magicgui(
             auto_call=True,
             # IMPORTANT: use FloatRangeSlider for floats; RangeSlider remains for ints
-            circularity={"widget_type": "FloatRangeSlider", "min": 0.0, "max": 1.0, "step": 0.1, "value": c_rng, "label": "circularity"},
-            diameter={"widget_type": "RangeSlider", "min": 0, "max": 200, "step": 10, "value": d_rng, "label": "equivalent_diameter"},
+            circularity={"widget_type": "FloatRangeSlider", "min": 0.0, "max": 1.0, "step": 0.1, "value": c_rng, "label": "Circularity"},
+            diameter={"widget_type": "RangeSlider", "min": 0, "max": 200, "step": 10, "value": d_rng, "label": "Eq. diameter (px)"},
         )    
         def filter_points(circularity, diameter):
             circ = all_properties.get("circularity")

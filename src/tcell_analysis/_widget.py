@@ -70,6 +70,13 @@ def _find_sample_image(base: Path) -> Path | None:
             return hits[0]
     return None
 
+def make_dialog(title: str, parent=None, w: int = 600, h: int = 400) -> QDialog:
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.setMinimumSize(w, h)
+    lay = QVBoxLayout(dlg)
+    return dlg, lay
+
 def _choose_channels_and_seg_pixel(parent, file_path: Path, prefer_name: str = "Actin"):
     """
     Pop a table listing detected channels:
@@ -89,9 +96,9 @@ def _choose_channels_and_seg_pixel(parent, file_path: Path, prefer_name: str = "
         # just make something reasonable if none
         detected = [f"C{i}" for i in range(int(img.shape["C"]))]
 
-    dlg = QDialog(parent)
-    dlg.setWindowTitle("Select & Rename Channels, Pick Segmentation Channel")
-    lay = QVBoxLayout(dlg)
+    dlg, lay = make_dialog("Select & Rename Channels, Pick Segmentation Channel", 
+                           parent)
+
 
     table = QTableWidget(dlg)
     table.setColumnCount(4)
@@ -202,10 +209,30 @@ def _iter_immediate_subfolders(base: Path) -> List[Path]:
         return []
 
 
+from qtpy.QtCore import Qt, QPoint, QRect
+from qtpy.QtWidgets import QInputDialog, QApplication
+
 def _prompt_text(parent, title: str, label: str, default: str) -> str | None:
-    txt, ok = QInputDialog.getText(parent.native if hasattr(parent, "native") else parent, title, label, text=default)
-    if ok and str(txt).strip():
-        return str(txt).strip()
+    """Prompt user for a text input, centered and wider than default."""
+    dlg_parent = parent.native if hasattr(parent, "native") else parent
+
+    dlg = QInputDialog(dlg_parent)
+    dlg.setWindowTitle(title)
+    dlg.setLabelText(label)
+    dlg.setTextValue(default)
+    dlg.setMinimumWidth(400)   # make wider
+    dlg.resize(400, 150)       # optional: fix height too
+    dlg.setSizeGripEnabled(True)
+
+    # --- Center on screen ---
+    screen = QApplication.primaryScreen().geometry()
+    dlg_rect = dlg.frameGeometry()
+    center_point = screen.center() - dlg_rect.center()
+    dlg.move(center_point)
+
+    if dlg.exec_() == QInputDialog.Accepted:
+        txt = dlg.textValue().strip()
+        return txt if txt else None
     return None
 
 
@@ -220,7 +247,6 @@ def _ask_conditions_for_subfolders(parent_widget, base_path: Path,
         mapping[key] = val if val is not None else default
     return mapping
 
-
 def _choose_conditions_dialog(parent, pairs: List[Tuple[Path, str]]) -> List[Tuple[Path, str]]:
     """
     Show a checkbox list of (path, label) and return the checked subset.
@@ -229,6 +255,7 @@ def _choose_conditions_dialog(parent, pairs: List[Tuple[Path, str]]) -> List[Tup
     dlg = QDialog(parent)
     dlg.setWindowTitle("Select condition to set segmentation parameters")
     lay = QVBoxLayout(dlg)
+    dlg.setMinimumSize(600, 400)
     lst = QListWidget(dlg)
     lst.setSelectionMode(QListWidget.NoSelection)
     for p, label in pairs:
@@ -328,7 +355,10 @@ class ProgressPanel(QWidget):
         self._update_elapsed_labels(force=True)
 
     def append(self, msg):
-        self.log.append(msg)
+        cursor = self.log.textCursor()
+        cursor.movePosition(cursor.Start)
+        cursor.insertText("⏳ " + msg + "\n\n")
+        self.log.setTextCursor(cursor)
         self.log.ensureCursorVisible()
 
     def mark_finished(self):
