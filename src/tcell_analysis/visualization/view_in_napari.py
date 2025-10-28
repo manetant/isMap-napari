@@ -897,6 +897,34 @@ def show_analysis_results(
         _panel_layout.setContentsMargins(6, 6, 6, 6)
         _panel_layout.addWidget(canvas)
 
+        # --- Save MFI boxplot as PNG ---
+        row_png = QHBoxLayout()
+        btn_save_mfi_png = QPushButton("Save plot")
+        row_png.addWidget(btn_save_mfi_png)
+        _panel_layout.addLayout(row_png)
+
+        def _save_mfi_png():
+            try:
+                # use current UI state for filename (metric + normalization flag)
+                cur_m = boxplot_controls.metric.value if hasattr(boxplot_controls, "metric") else "metric"
+                cur_n = bool(boxplot_controls.normalized.value) if hasattr(boxplot_controls, "normalized") else False
+                suffix = "_normalized" if cur_n else ""
+                default_png = str((Path(output_folder) / f"mfi_{cur_m}{suffix}.png"))
+
+                parent = getattr(viewer.window, "_qt_window", None)
+                out, _ = QFileDialog.getSaveFileName(parent, "Save MFI plot as PNG", default_png, "PNG (*.png)")
+                if not out:
+                    return
+                fig.savefig(out, dpi=300, bbox_inches="tight")
+                viewer.status = f"Saved MFI PNG: {out}"
+            except Exception as e:
+                viewer.status = f"⚠️ Save MFI PNG failed: {e}"
+
+        btn_save_mfi_png.clicked.connect(_save_mfi_png)
+
+        # keep refs so Qt/GC doesn't eat the button/closure
+        _keep_refs(btn_save_mfi_png)
+
         # choose default metric using the detected seg name of the first valid frame
         mean_intensity_metrics = [k for k in all_properties if k.endswith("_mean_intensity")]
         default_metric = None
@@ -1304,8 +1332,8 @@ def show_analysis_results(
             if dock_widget is not None:
                 # These generally work on the dock widget itself
                 dock_widget.setMinimumWidth(600)
-                dock_widget.setMinimumHeight(520)
-                dock_widget.resize(600, 520)
+                dock_widget.setMinimumHeight(550)
+                dock_widget.resize(600, 550)
         except Exception as e:
             viewer.status = f"⚠️ Could not resize Analysis Plots dock: {e}"
 
