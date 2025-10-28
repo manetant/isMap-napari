@@ -12,7 +12,7 @@ from magicgui.widgets import Container, FileEdit, PushButton
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from qtpy.QtWidgets import QWidget, QVBoxLayout, QTabWidget, QLabel
-from qtpy.QtWidgets import QPushButton, QFileDialog, QHBoxLayout
+from qtpy.QtWidgets import QPushButton, QFileDialog, QHBoxLayout, QSizePolicy
 import re
 
 def reset_tcell_session(viewer):
@@ -769,6 +769,47 @@ def show_analysis_results(
         c_rng = tuple(initial_ranges.get("circularity", (0.0, 1.0)))
         d_rng = tuple(initial_ranges.get("equivalent_diameter", (0, 200)))
 
+        # Pull full distributions once (all cells, unfiltered)
+        circ_all = np.asarray(all_properties.get("circularity", np.array([])), dtype=float)
+        diam_all = np.asarray(all_properties.get("equivalent_diameter", np.array([])), dtype=float)
+
+        # ---- Histograms (static) ----
+        # Circularity
+        fig_circ, ax_circ = plt.subplots(figsize=(4.6, 2.2))
+        canvas_circ = FigureCanvas(fig_circ)
+        if circ_all.size:
+            ax_circ.hist(circ_all[np.isfinite(circ_all)], bins=10)
+            ax_circ.set_title("Circularity (all cells)")
+            ax_circ.set_xlabel("circularity")
+            ax_circ.set_ylabel("count")
+            # show initial range
+            ax_circ.axvline(c_rng[0], ls="--", alpha=0.6)
+            ax_circ.axvline(c_rng[1], ls="--", alpha=0.6)
+            fig_circ.tight_layout()
+            canvas_circ.draw_idle()
+        else:
+            ax_circ.set_title("Circularity: no data")
+            fig_circ.tight_layout()
+            canvas_circ.draw_idle()
+
+        # Diameter
+        fig_diam, ax_diam = plt.subplots(figsize=(4.6, 2.2))
+        canvas_diam = FigureCanvas(fig_diam)
+        if diam_all.size:
+            ax_diam.hist(diam_all[np.isfinite(diam_all)], bins=50)
+            ax_diam.set_title("Equivalent diameter (all cells)")
+            ax_diam.set_xlabel("equivalent_diameter (px)")
+            ax_diam.set_ylabel("count")
+            # show initial range
+            ax_diam.axvline(d_rng[0], ls="--", alpha=0.6)
+            ax_diam.axvline(d_rng[1], ls="--", alpha=0.6)
+            fig_diam.tight_layout()
+            canvas_diam.draw_idle()
+        else:
+            ax_diam.set_title("Equivalent diameter: no data")
+            fig_diam.tight_layout()
+            canvas_diam.draw_idle()
+
         @magicgui(
             auto_call=True,
             # IMPORTANT: use FloatRangeSlider for floats; RangeSlider remains for ints
@@ -801,11 +842,48 @@ def show_analysis_results(
                     "equivalent_diameter": (float(dmin), float(dmax)),
                 })
 
+        # ---- Compose a panel: histograms on top, sliders under them ----
         _remove_dock("Filter Cells")
-        viewer.window.add_dock_widget(filter_points.native, area="right", name="Filter Cells")
+        filter_panel = QWidget()
+        _filter_layout = QVBoxLayout(filter_panel)
+        _filter_layout.setContentsMargins(6, 6, 6, 6)
+
+        lbl_hint = QLabel("Distributions (all cells). Dashed lines mark initial ranges.")
+        lbl_hint.setWordWrap(True)
+
+        _filter_layout.addWidget(lbl_hint)
+        _filter_layout.addWidget(canvas_circ)
+        _filter_layout.addWidget(canvas_diam)
+        _filter_layout.addWidget(filter_points.native)
+
+        viewer.window.add_dock_widget(filter_panel, area="right", name="Filter Cells")
+
+        # ---- Make the Filter Cells dock larger by default ----
+        try:
+            # First, give the inner panel a minimum size (so the canvas + sliders fit)
+            filter_panel.setMinimumHeight(600)
+            filter_panel.setMinimumWidth(450)
+            filter_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+            # Then try to resize the actual dock widget if accessible
+            docks = getattr(viewer.window, "dock_widgets", {})
+            dock_widget = docks.get("Filter Cells", None)
+            if dock_widget is not None:
+                dock_widget.setMinimumHeight(600)
+                dock_widget.setMinimumWidth(450)
+                dock_widget.resize(450, 600)
+        except Exception as e:
+            viewer.status = f"⚠️ Could not resize Filter Cells dock: {e}"
+
+        # prevent GC
+        _keep_refs(
+            fig_circ, ax_circ, canvas_circ,
+            fig_diam, ax_diam, canvas_diam,
+            filter_panel, lbl_hint, filter_points
+        )
 
     else:
-        _remove_dock("Filter Cells")   # ← ensure it disappears when not requested
+        _remove_dock("Filter Cells")
 
     # ---------- boxplot (tags from CSV) ----------
     if show_boxplot:
@@ -1225,9 +1303,9 @@ def show_analysis_results(
 
             if dock_widget is not None:
                 # These generally work on the dock widget itself
-                dock_widget.setMinimumWidth(900)
-                dock_widget.setMinimumHeight(700)
-                dock_widget.resize(900, 700)
+                dock_widget.setMinimumWidth(600)
+                dock_widget.setMinimumHeight(520)
+                dock_widget.resize(600, 520)
         except Exception as e:
             viewer.status = f"⚠️ Could not resize Analysis Plots dock: {e}"
 

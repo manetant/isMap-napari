@@ -640,53 +640,6 @@ def tcell_widget():
         except Exception:
             pass
 
-    # ---------- GATHER ALL CASES (utility) ----------
-    '''
-    def _gather_all_cases() -> List[Tuple[Path, str]]:
-        tasks: List[Tuple[Path, str]] = []
-
-        # primary
-        if form.input_folder.value:
-            base = Path(form.input_folder.value)
-            subs = _iter_immediate_subfolders(base)
-            if subs:
-                if not primary.conditions_by_subfolder:
-                    primary.conditions_by_subfolder = _ask_conditions_for_subfolders(form, base, None)
-                    primary.conditions_for_path = str(base)
-                for s in sorted(subs):
-                    tasks.append((s, primary.conditions_by_subfolder.get(s.name, s.name)))
-            else:
-                if not primary.tag.strip():
-                    t = _prompt_text(form, "Tag this input", f"Enter a tag for “{base.name}”:", base.name)
-                    if t:
-                        primary.tag = t; primary.tagged_path = str(base)
-                if primary.tag.strip():
-                    tasks.append((base, primary.tag))
-
-        # extras
-        for fe in extra_rows:
-            if not fe.value:
-                continue
-            st = state_by_row.get(fe, RowState())
-            base = Path(fe.value)
-            subs = _iter_immediate_subfolders(base)
-            if subs:
-                if not st.conditions_by_subfolder:
-                    st.conditions_by_subfolder = _ask_conditions_for_subfolders(fe, base, None)
-                    st.conditions_for_path = str(base)
-                for s in sorted(subs):
-                    tasks.append((s, st.conditions_by_subfolder.get(s.name, s.name)))
-            else:
-                if not st.tag.strip():
-                    t = _prompt_text(fe, "Tag this input", f"Enter a tag for “{base.name}”:", base.name)
-                    if t:
-                        st.tag = t; st.tagged_path = str(base)
-                        state_by_row[fe] = st
-                if st.tag.strip():
-                    tasks.append((base, st.tag))
-        return tasks
-    '''
-
     def _gather_all_cases() -> List[Tuple[Path, str]]:
         tasks: List[Tuple[Path, str]] = []
         if form.input_folder.value:
