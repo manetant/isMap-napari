@@ -20,6 +20,7 @@ from .extract_cells import extract_cells, save_cells
 from .masking.segment import segment_channel
 from .metrics import calculate_intensity_metrics, extract_features_for_labels
 from .my_utils import convert_nd2_to_tiff, read_any_to_cyx
+from .metadata_utils import avg_px_um
 from .visualization.plots import save_all_channels_plot, save_channel_overlays
 from typing import Union
 from typing import Any, Dict, List
@@ -385,6 +386,7 @@ def process_tiff(
     seg_model = ("cyto3" if str(seg_model).lower() not in {"cyto2", "cyto3"} else str(seg_model).lower())
     seg_scale = float(np.clip(seg_scale, 0.25, 1.0))
     seg_diameter = int(max(1, seg_diameter))
+    print(f"[INFO] diameter_in_px={seg_diameter}")
 
     with timeit("cellpose segmentation"):
         masks, flows, styles, imgs_dn = segment_channel(
@@ -606,6 +608,7 @@ def process_image_file(
         feature_thresholds: Dict[str, tuple] | None = None,
         seg_model: str = "cyto3",
         seg_diameter: int = 100,
+        seg_diam_units: str = "px",
         seg_scale: float = 1.0,        
     ):
     case_name = os.path.splitext(os.path.basename(file_path))[0]
@@ -661,7 +664,7 @@ def process_image_file(
         print(channel_names)
 
 
-        cyx, seg_raw, out_paths, channel_names = read_any_to_cyx(
+        cyx, seg_raw, out_paths, channel_names, px_size  = read_any_to_cyx(
             file_path,
             tiff_output_dir,
             z_mode="max",
@@ -675,6 +678,13 @@ def process_image_file(
             seg_channel=seg_channel,
         )
 
+        # Compute average µm/px (if available)
+        avg_um_per_px = avg_px_um(px_size)
+        seg_diameter_px = int(max(1, round(
+            (seg_diameter / avg_um_per_px) if (seg_diam_units == "µm" and avg_um_per_px) else seg_diameter
+        )))
+        
+        
         tiff_path = out_paths.get("processed") or out_paths.get("raw")  # prefer processed
         assert tiff_path, "read_any_to_cyx did not return an output path"
 
@@ -702,7 +712,7 @@ def process_image_file(
             seg_channel=seg_channel,
             feature_thresholds=feature_thresholds,
             seg_model=seg_model,
-            seg_diameter=seg_diameter,
+            seg_diameter=seg_diameter_px,
             seg_scale=seg_scale,    
         )
 
@@ -744,6 +754,7 @@ def process_folder(
         feature_thresholds: Dict[str, tuple] | None = None,
         seg_model: str = "cyto3",
         seg_diameter: int = 100,
+        seg_diam_units: str = "px",
         seg_scale: float = 1.0,        
     ):
 
@@ -787,7 +798,7 @@ def process_folder(
             continue
 
         to_run.append((file_path, chs, in_root, out_root, n_workers, tg, save_ext, 
-                       segch, cmap, seg_model, seg_diameter, seg_scale))
+                       segch, cmap, seg_model, seg_diameter, seg_diam_units, seg_scale))
 
     print(f"[INFO] Found {len(tasks)} frames total; {len(to_run)} to process, {len(tasks)-len(to_run)} already complete.\n")
 
@@ -806,10 +817,11 @@ def process_folder(
                 feature_thresholds=feature_thresholds, 
                 seg_model=seg_model,
                 seg_diameter=seg_diameter,
+                seg_diam_units=seg_diam_units,
                 seg_scale=seg_scale,        
             ): (file_path, chs)
             for (file_path, chs, in_root, out_root, n_workers, tg, save_ext, 
-                 segch, cmap, seg_model, seg_diameter, seg_scale) in to_run
+                 segch, cmap, seg_model, seg_diameter, seg_diam_units, seg_scale) in to_run
         }
         with tqdm(total=len(futures), desc="Processing frames") as pbar:
             for future in as_completed(futures):
@@ -885,6 +897,7 @@ def run_analysis(
         feature_thresholds: Dict[str, tuple] | None = None, 
         seg_model: str = "cyto3",
         seg_diameter: int = 100,
+        seg_diam_units: str = "px",
         seg_scale: float = 1.0,        
     ):
 
@@ -898,7 +911,8 @@ def run_analysis(
         "code_version": code_version,
         "seg_channel": seg_channel,
         "seg_params": {"model": seg_model, 
-                       "diameter_px": seg_diameter, 
+                       "diameter": seg_diameter, 
+                       "diameter_units": seg_diam_units,
                        "scale": seg_scale},
     }, indent=2))
 
@@ -930,6 +944,7 @@ def run_analysis(
         feature_thresholds=feature_thresholds, 
         seg_model=seg_model,
         seg_diameter=seg_diameter,
+        seg_diam_units=seg_diam_units,
         seg_scale=seg_scale,        
     )
 

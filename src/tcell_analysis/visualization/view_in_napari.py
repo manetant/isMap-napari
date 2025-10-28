@@ -125,6 +125,7 @@ def show_analysis_results(
     show_boxplot: bool = True,
     show_pcc: bool = True,
     show_radial_viewer: bool = True,
+    um_per_px: float | None = None,
 ):
     if initial_ranges is None:
         initial_ranges = {}
@@ -134,7 +135,11 @@ def show_analysis_results(
     except Exception:
         # don't block; continue even if cleanup hits a harmless error
         pass
-    
+    try:
+        um_per_px = float(um_per_px) if um_per_px is not None else None
+    except Exception:
+        um_per_px = None
+
     # Tag we place on all layers we add so we can clean them up later
     PLUGIN_TAG = "tcell_analysis_layers"
     radial_controls = None
@@ -554,8 +559,8 @@ def show_analysis_results(
             _profile_cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
             _legend_map = {}  # legend line -> plotted line
 
-            def _get_profile(tag: str, ch: str):
-                key = (tag, ch)
+            def _get_profile(tag: str, ch: str, x_mode: str):
+                key = (tag, ch, x_mode)
                 if key in _profile_cache:
                     return _profile_cache[key]
                 cdir = cond_dirs.get(tag)
@@ -568,15 +573,22 @@ def show_analysis_results(
                 prof = _diagonal_profile(arr, diagonal="main")
                 if prof.size == 0:
                     return None
-                x = np.linspace(-1.0, 1.0, len(prof), dtype=float)
+                
+                if (x_mode == "Micrometers (µm)") and (um_per_px is not None):
+                    n = len(prof)
+                    half = (n - 1) / 2.0
+                    x = (np.arange(n, dtype=float) - half) * um_per_px
+                else:
+                    x = np.linspace(-1.0, 1.0, len(prof), dtype=float)
+
                 _profile_cache[key] = (x, prof)
                 return _profile_cache[key]
 
             def _connect_pickable_legend():
                 # one column, top-right
                 leg = ax_lp.legend(
-                    loc="upper right",     # <- moved to top-right
-                    ncol=1,                # <- single column
+                    loc="upper right",  
+                    ncol=1,             
                     fontsize=8,
                     frameon=True,
                 )
@@ -607,14 +619,18 @@ def show_analysis_results(
             @magicgui(
                 auto_call=True,
                 tag={"choices": all_tags, "label": "Condition"},
+                x_mode={"choices": ["Normalized (-1..1)", "Micrometers (µm)"], "label": "X-axis"},
             )
-            def radial_line_profiles(tag: str = (all_tags[0] if all_tags else "N/A")):
+            def radial_line_profiles(
+                tag: str = (all_tags[0] if all_tags else "N/A"),
+                x_mode: str = "Normalized (-1..1)",
+            ):
                 ax_lp.clear()
                 _legend_map.clear()
 
                 plotted_any = False
                 for ch in all_channels:
-                    xy = _get_profile(tag, ch)
+                    xy = _get_profile(tag, ch, x_mode)
                     if xy is None:
                         continue
                     x, y = xy
@@ -626,9 +642,15 @@ def show_analysis_results(
                     canvas_lp.draw_idle()
                     return
 
-                ax_lp.set_xlim(-1.0, 1.0)
+                # X-axis label & limits
+                if (x_mode == "Micrometers (µm)") and (um_per_px is not None):
+                    ax_lp.set_xlabel("Distance from center (µm)")
+                    ax_lp.set_xlim(x.min(), x.max())
+                else:
+                    ax_lp.set_xlabel("Distance from center (A.U.)")
+                    ax_lp.set_xlim(-1.0, 1.0)
+
                 ax_lp.set_ylim(0.0, 1.1)
-                ax_lp.set_xlabel("Distance from center (A.U.)")
                 ax_lp.set_ylabel("MFI (normalized)")
                 ax_lp.set_title(f"Diagonal MFI — {tag}")
 
@@ -639,7 +661,8 @@ def show_analysis_results(
             if all_tags:
                 try:
                     # call once with the first condition to trigger plotting
-                    radial_line_profiles(tag=all_tags[0])
+                    default_x_mode = "Micrometers (µm)" if (um_per_px is not None) else "Normalized (-1..1)"
+                    radial_line_profiles(tag=all_tags[0], x_mode=default_x_mode)
                 except Exception as e:
                     viewer.status = f"Init radial plot failed: {e}"
 
@@ -732,23 +755,34 @@ def show_analysis_results(
                                 if prof.size == 0:
                                     continue
                                 x = np.linspace(-1.0, 1.0, len(prof), dtype=float)
+                                x_norm = np.linspace(-1.0, 1.0, len(prof), dtype=float)
+
+                                # include µm if available
+                                if um_per_px:
+                                    half = (len(prof) - 1) / 2.0
+                                    r_um = (np.arange(len(prof), dtype=float) - half) * um_per_px
+                                else:
+                                    r_um = [None] * len(prof)
+
                                 rows.extend({
                                     "condition": str(tag),
                                     "channel": str(ch),
-                                    "x_norm": float(xi),
+                                    "x_norm": float(xn),
+                                    "r_um": (float(ru) if ru is not None else None),
                                     "mfi_norm": float(yi),
-                                } for xi, yi in zip(x, prof))
-                            except Exception as e:
-                                viewer.status = f"⚠️ Skipped {tag}/{ch}: {e}"
+                                } for xn, ru, yi in zip(x_norm, r_um, prof))
 
-                    df_all = pd.DataFrame(rows, columns=["condition", "channel", "x_norm", "mfi_norm"])
+                            except Exception as e:
+                                viewer.status = f"Skipped {tag}/{ch}: {e}"
+
+                    df_all = pd.DataFrame(rows, columns=["condition", "channel", "x_norm", "r_um", "mfi_norm"])
                     if df_all.empty:
-                        viewer.status = "⚠️ No diagonal profiles found to export."
+                        viewer.status = "No diagonal profiles found to export."
                         return
                     df_all.to_csv(out, index=False)
                     viewer.status = f"Saved all diagonals to: {out}"
                 except Exception as e:
-                    viewer.status = f"⚠️ Export failed: {e}"
+                    viewer.status = f"Export failed: {e}"
 
             btn_export_all.clicked.connect(_export_all_diagonals_csv)
 
@@ -1009,7 +1043,7 @@ def show_analysis_results(
                 showfliers=True)
             
             ax.set_xlabel("Condition")
-            ax.set_ylabel(metric + (" (a.u.)" if not normalized else " (normalized)"))
+            ax.set_ylabel(metric + (" (A.U.)" if not normalized else " (normalized)"))
             title = (metric if not normalized else f"{metric} (normalized)")
             ax.set_title(f"{title} by condition")
             for lab in ax.get_xticklabels():
@@ -1333,8 +1367,8 @@ def show_analysis_results(
             if dock_widget is not None:
                 # These generally work on the dock widget itself
                 dock_widget.setMinimumWidth(600)
-                dock_widget.setMinimumHeight(560)
-                dock_widget.resize(600, 560)
+                dock_widget.setMinimumHeight(600)
+                dock_widget.resize(600, 600)
         except Exception as e:
             viewer.status = f"⚠️ Could not resize Analysis Plots dock: {e}"
 

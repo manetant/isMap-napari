@@ -7,7 +7,7 @@ from nd2reader import ND2Reader
 from typing import Dict, List, Optional, Tuple
 import time
 import logging
-
+from .metadata_utils import get_pixel_sizes_and_units
 from .preprocessing.background import (bg_remove_rolling_ball,
                                        bg_remove_gaussian,
                                        bg_remove_tophat)
@@ -89,7 +89,6 @@ def _bg_remove(img: np.ndarray, method: str, radius: int,
         return bg_remove_tophat(img, **kwargs)
     raise ValueError(f"Unknown bg method: {method}")
 
-
 def read_any_to_cyx(
     file_path: str,
     tiff_output_dir: Optional[str] = None,
@@ -115,6 +114,7 @@ def read_any_to_cyx(
         cyx_raw:  np.ndarray (C, Y, X)  - raw after Z-collapse/reorder/rename
         out_paths: dict with keys {"raw", "processed"} -> saved TIFF paths (or None)
         final_names: list[str] for channels, in order
+        px_meta: {"X": float|None, "Y": float|None, "unit": str}
     '''
 
     print(f"Reading {file_path} ...")
@@ -272,6 +272,8 @@ def read_any_to_cyx(
             "BackgroundMaxSide": (int(bg_max_side) if (apply_bg and bg_max_side is not None) else None),
             "SegChannel": final_names[seg_idx] if seg_idx is not None else None,
         }
+        # pixel sizes
+        px_meta_clean = get_pixel_sizes_and_units(img)
 
         # RAW
         raw_path = str(base.with_suffix(".raw.tiff"))
@@ -280,9 +282,9 @@ def read_any_to_cyx(
             cyx_raw,
             ome=bool(save_ome_tiff),
             metadata=(
-                {"axes": "CYX", "Channel": {"Name": final_names}}
+                {"axes": "CYX", "Channel": {"Name": final_names}, **px_meta_clean}
                 if save_ome_tiff else
-                {"axes": "CYX", "channel_names": final_names}
+                {"axes": "CYX", "channel_names": final_names, **bg_meta, **px_meta_clean}
             ),
             bigtiff=True,
             compression=compression,
@@ -296,16 +298,16 @@ def read_any_to_cyx(
             cyx_proc,
             ome=bool(save_ome_tiff),
             metadata=(
-                {"axes": "CYX", "Channel": {"Name": final_names}, **bg_meta}
+                {"axes": "CYX", "Channel": {"Name": final_names}, **bg_meta, **px_meta_clean}
                 if save_ome_tiff else
-                {"axes": "CYX", "channel_names": final_names, **bg_meta}
+                {"axes": "CYX", "channel_names": final_names, **bg_meta, **px_meta_clean}
             ),
             bigtiff=True,
             compression=compression,
         )
         out_paths["processed"] = proc_path
 
-    return cyx_proc, seg_raw, out_paths, final_names
+    return cyx_proc, seg_raw, out_paths, final_names, px_meta_clean
 
 
 def convert_nd2_to_tiff(nd2_file_path, channel_names, output_dir):

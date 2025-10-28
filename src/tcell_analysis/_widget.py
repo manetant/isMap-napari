@@ -32,6 +32,7 @@ from qtpy.QtCore import QTimer
 from qtpy.QtGui import QPixmap
 from qtpy.QtCore import Qt
 
+from .metadata_utils import get_pixel_sizes_and_units, avg_px_um
 
 def wrap_form_with_logo(base_form_native, logo_path: Path, width_px: int = 600) -> QWidget:
     """
@@ -69,7 +70,7 @@ def _find_sample_image(base: Path) -> Path | None:
             return hits[0]
     return None
 
-def _choose_channels_and_seg(parent, file_path: Path, prefer_name: str = "Actin"):
+def _choose_channels_and_seg_pixel(parent, file_path: Path, prefer_name: str = "Actin"):
     """
     Pop a table listing detected channels:
       (selected_names_ordered, channel_map_orig_to_new, segmentation_name) 
@@ -77,6 +78,9 @@ def _choose_channels_and_seg(parent, file_path: Path, prefer_name: str = "Actin"
     """
     # detect channels with BioImage
     img = BioImage(str(file_path))
+    px_meta = get_pixel_sizes_and_units(img)
+    um_per_px = avg_px_um(px_meta)
+
     detected = list(getattr(img, "channel_names", []) or [])
     if not detected:
         # fallback to OME-XML or generic C0.. if needed
@@ -131,7 +135,7 @@ def _choose_channels_and_seg(parent, file_path: Path, prefer_name: str = "Actin"
     btns.rejected.connect(dlg.reject)
 
     if dlg.exec_() != QDialog.Accepted:
-        return None, None, None
+        return None, None, None, None
 
     # collect
     keep_rows = []
@@ -143,7 +147,7 @@ def _choose_channels_and_seg(parent, file_path: Path, prefer_name: str = "Actin"
             keep_rows.append((orig, new, r))
 
     if not keep_rows:
-        return None, None, None
+        return None, None, None, None
 
     seg_row = seg_group.checkedId()
     seg_orig = detected[seg_row] if 0 <= seg_row < len(detected) else keep_rows[-1][0]
@@ -156,7 +160,7 @@ def _choose_channels_and_seg(parent, file_path: Path, prefer_name: str = "Actin"
 
     # final segmentation name is the renamed one (if kept)
     seg_new = channel_map.get(seg_orig, keep_rows[0][1])
-    return selected_names, channel_map, seg_new
+    return selected_names, channel_map, seg_new, um_per_px
 
 
 @dataclass
@@ -287,6 +291,7 @@ class ProgressPanel(QWidget):
 
         # Timing state
         self._overall_start = None   # type: float | None
+        self._current_start = None 
         self._running = False
 
         # Tick every second to refresh labels
@@ -374,9 +379,10 @@ def tcell_widget():
     chosen_channel_names: List[str] = []
     chosen_seg_channel: str | None = None
     chosen_channel_map: Dict[str, str] = {}
+    um_per_px_global: float | None = None
 
     def _ensure_channel_selection(base_path_for_sampling: Path, parent_window) -> bool:
-        nonlocal chosen_channel_names, chosen_seg_channel, chosen_channel_map
+        nonlocal chosen_channel_names, chosen_seg_channel, chosen_channel_map, um_per_px_global
 
         if chosen_channel_names and chosen_seg_channel:
             return True
@@ -385,13 +391,14 @@ def tcell_widget():
         if sample is None:
             return False
 
-        sel_names, ch_map, seg_new = _choose_channels_and_seg(parent_window, sample, prefer_name="Actin")
+        sel_names, ch_map, seg_new, um_per_px = _choose_channels_and_seg_pixel(parent_window, sample, prefer_name="Actin")
         if not sel_names:
             return False
 
         chosen_channel_names = sel_names
         chosen_seg_channel   = seg_new
         chosen_channel_map   = ch_map
+        um_per_px_global     = um_per_px 
         return True
 
     # ---------- BASE FORM ----------
@@ -410,6 +417,7 @@ def tcell_widget():
         #save_extracted: bool,
         seg_model: str,
         seg_diameter: int,
+        seg_diam_units: str,
         seg_scale: float,        
     ):
         ...
@@ -418,7 +426,8 @@ def tcell_widget():
     seg_header = Label(value="<b>Segmentation Parameters</b> "
                              "<span style='color:#777'>(used only for segmentation)</span>")
     seg_model = ComboBox(label="Model", choices=["cyto3", "cyto2"], value="cyto3")
-    seg_diameter = SpinBox(label="Diameter (px)", min=5, max=500, value=100, step=1)
+    seg_diameter = SpinBox(label="Diameter", min=0, max=500, value=100, step=1)
+    seg_diam_units = ComboBox(label="Diameter units", choices=["px", "µm"], value="px")
     seg_scale = ComboBox(
         label="Scale (×)",
         choices=[f"{x/10:.1f}" for x in range(10, 2, -1)],
@@ -427,7 +436,7 @@ def tcell_widget():
     )
 
     seg_block = Container(layout="vertical", labels=True)
-    seg_block.extend([seg_header, seg_model, seg_diameter, seg_scale])
+    seg_block.extend([seg_header, seg_model, seg_diameter, seg_diam_units, seg_scale])
 
     @form.input_folder.changed.connect
     def _on_primary_changed(path: Path | None):
@@ -594,6 +603,7 @@ def tcell_widget():
         try:
             seg_model.value = "cyto3"
             seg_diameter.value = 100
+            seg_diam_units.value = "px"
             seg_scale.value = "0.7"
         except Exception:
             pass
@@ -708,6 +718,7 @@ def tcell_widget():
                     channel_rename_map=chosen_channel_map,
                     seg_model=str(seg_model.value),
                     seg_diameter=int(seg_diameter.value),
+                    seg_diam_units=str(seg_diam_units.value),
                     seg_scale=float(seg_scale.value),
                 )
 
@@ -734,6 +745,7 @@ def tcell_widget():
                     show_boxplot=False,
                     show_radial_viewer=False,
                     show_pcc=False,
+                    um_per_px=um_per_px_global,
                 )
             except Exception as e:
                 viewer.status = f"⚠️ Visualization warning: {e}"
@@ -805,6 +817,7 @@ def tcell_widget():
                     feature_thresholds=fea_thresh,
                     seg_model=str(seg_model.value),
                     seg_diameter=int(seg_diameter.value),
+                    seg_diam_units=str(seg_diam_units.value),
                     seg_scale=float(seg_scale.value),
                 )
 
@@ -827,6 +840,7 @@ def tcell_widget():
                     show_boxplot=True,
                     show_radial_viewer=True,
                     show_pcc=True,
+                    um_per_px=um_per_px_global,
                 )
             except Exception as e:
                 viewer.status = f"⚠️ Visualization warning: {e}"
