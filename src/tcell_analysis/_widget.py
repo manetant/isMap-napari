@@ -26,7 +26,7 @@ from .analysis import run_analysis
 from .visualization.view_in_napari import show_analysis_results
 from napari import current_viewer
 from .visualization.view_in_napari import reset_tcell_session  # make sure this import is present
-from qtpy.QtWidgets import QLineEdit
+from qtpy.QtWidgets import QLineEdit, QMessageBox
 import time
 from qtpy.QtCore import QTimer
 from qtpy.QtGui import QPixmap
@@ -207,10 +207,6 @@ def _iter_immediate_subfolders(base: Path) -> List[Path]:
         return [p for p in base.iterdir() if p.is_dir()]
     except Exception:
         return []
-
-
-from qtpy.QtCore import Qt, QPoint, QRect
-from qtpy.QtWidgets import QInputDialog, QApplication
 
 def _prompt_text(parent, title: str, label: str, default: str) -> str | None:
     """Prompt user for a text input, centered and wider than default."""
@@ -493,7 +489,8 @@ def tcell_widget():
     # ---------- BUILD UI ORDER ----------
     run_seg_btn = PushButton(label="Run Segmentation")
     run_all_btn = PushButton(label="Run Analysis")
-    reset_btn   = PushButton(label="Reset session")
+    load_btn = PushButton(label="Load Data")
+    reset_btn   = PushButton(label="Reset Session")
 
     # Make it look dangerous and distinct
     try:
@@ -532,8 +529,8 @@ def tcell_widget():
     ui.append(form.output_folder)
     ui.append(seg_block)
     ui.append(run_seg_btn) 
-    ui.append(run_all_btn) 
-    ui.append(Label(value="<hr>"))
+    ui.append(run_all_btn)
+    ui.append(load_btn) 
     ui.append(reset_btn)
 
 
@@ -679,6 +676,13 @@ def tcell_widget():
                     tasks.append((base, primary.tag))
         return tasks
 
+    @load_btn.changed.connect
+    def _load_data(_=None):
+        viewer = current_viewer()
+        if viewer:
+            viewer.status = "⏳ In progress ..."
+        QMessageBox.information(viewer.window._qt_window if viewer else None,
+                                "Load data", "In progress ...")    
     # ---------- RUN SEGMENTATION (pilot) ----------
     @run_seg_btn.changed.connect
     def _run_segmentation(_=None):
