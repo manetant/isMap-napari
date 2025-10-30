@@ -510,6 +510,63 @@ def show_analysis_results(
             p = cdir / f"{channel}_{base}{suff}.tif"
             return p if p.exists() else None
 
+        from qtpy.QtWidgets import QSlider
+        from qtpy.QtCore import Qt
+
+        # --- inside show_analysis_results ---
+        fig_radimg, ax_radimg = plt.subplots()
+        canvas_radimg = FigureCanvas(fig_radimg)
+        slider_z = QSlider(Qt.Horizontal)
+        slider_z.setMinimum(0)
+        slider_z.hide()  # shown only for 3D stacks
+
+        def _show_radial_in_panel(path: Path, title: str):
+            arr = _tiffread(str(path))
+            ax_radimg.clear()
+
+            if arr.ndim == 3:  # 3D stack (Z, Y, X)
+                slider_z.show()
+                slider_z.setMaximum(arr.shape[0] - 1)
+                mid = arr.shape[0] // 2
+                slider_z.setValue(mid)
+
+                # draw the mid-slice first
+                img2d = arr[mid, :, :]
+                ax_radimg.imshow(img2d, cmap="gray")
+                ax_radimg.set_title(f"{title} — Slice {mid+1}/{arr.shape[0]}")
+                ax_radimg.axis("off")
+                fig_radimg.tight_layout()
+                canvas_radimg.draw_idle()
+
+                # connect slider
+                def _update_slice(val):
+                    ax_radimg.clear()
+                    ax_radimg.imshow(arr[val, :, :], cmap="gray")
+                    ax_radimg.set_title(f"{title} — Slice {val+1}/{arr.shape[0]}")
+                    ax_radimg.axis("off")
+                    fig_radimg.tight_layout()
+                    canvas_radimg.draw_idle()
+
+                # reconnect cleanly
+                try:
+                    slider_z.valueChanged.disconnect()
+                except Exception:
+                    pass
+                slider_z.valueChanged.connect(_update_slice)
+
+            elif arr.ndim == 2:
+                slider_z.hide()
+                ax_radimg.imshow(arr, cmap="gray")
+                ax_radimg.set_title(title)
+                ax_radimg.axis("off")
+                fig_radimg.tight_layout()
+                canvas_radimg.draw_idle()
+
+            else:
+                slider_z.hide()
+                viewer.status = f"⚠️ Unexpected array shape {arr.shape} for {path.name}"
+
+
         @magicgui(
             auto_call=True,
             channel={"choices": radial_channels or ["(none)"], "label": "Channel"},
@@ -534,20 +591,22 @@ def show_analysis_results(
                 viewer.status = f"⚠️ Missing radial ({'scaled' if scaled else 'padded'}) for {channel}/{kind}"
                 return
 
-            nm = f"Radial {kind} – {channel} – {tag} – {'scaled' if scaled else 'padded'}"
-            arr = _tiffread(str(path))
+            title = f"{channel} — {kind} — {tag} — {'scaled' if scaled else 'padded'}"
+            _show_radial_in_panel(path, title)
 
-            try:
-                layer = viewer.layers[nm]
-                layer.data = arr
-                layer.metadata["tcell_analysis_layers"] = True
-            except KeyError:
-                viewer.add_image(arr, name=nm, metadata={"tcell_analysis_layers": True}, colormap="gray")
-
-
-        #_remove_dock("Radial Condition Viewer")
-        #dock_rcv = viewer.window.add_dock_widget(radial_controls, area="right", name="Radial Condition Viewer")
-        #_keep_refs(radial_controls, dock_rcv)
+        # Automatically display the first available radial image on load
+        try:
+            first_ch = radial_channels[0] if radial_channels else None
+            first_tag = sorted(set(tags_valid))[0] if tags_valid else None
+            if first_ch and first_tag:
+                radial_controls(
+                    channel=first_ch,
+                    kind="Total Average",
+                    tag=first_tag,
+                    scaled=True
+                )
+        except Exception as e:
+            viewer.status = f"⚠️ Could not init Radial Image display: {e}"            
 
         try:
             # ==== Radial Line Profiles (MFI normalized along a diagonal) ====
@@ -1335,18 +1394,19 @@ def show_analysis_results(
         tab_radimg_layout = QVBoxLayout(tab_radimg)
         tab_radimg_layout.setContentsMargins(6, 6, 6, 6)
         tab_radimg_layout.addWidget(radial_controls.native)
-        info_lbl = QLabel("Load radial images (TotAvg / Montage / Stack) into napari layers.")
-        info_lbl.setWordWrap(True)
-        tab_radimg_layout.addWidget(info_lbl)
+        tab_radimg_layout.addWidget(canvas_radimg)
+        tab_radimg_layout.addWidget(slider_z) 
         tabs.addTab(tab_radimg, "Radial Image")
+
+        _keep_refs(fig_radimg, ax_radimg, canvas_radimg, slider_z)
 
     # --- Tab 2: Radial Profiles (controls + canvas) ---
     if (radial_line_profiles is not None) and (panel_lp is not None):
         tab_profiles = QWidget()
         tab_profiles_layout = QVBoxLayout(tab_profiles)
         tab_profiles_layout.setContentsMargins(6, 6, 6, 6)
-        tab_profiles_layout.addWidget(radial_line_profiles.native)  # controls
-        tab_profiles_layout.addWidget(panel_lp)                     # figure canvas panel
+        tab_profiles_layout.addWidget(radial_line_profiles.native)  
+        tab_profiles_layout.addWidget(panel_lp)                    
         tabs.addTab(tab_profiles, "Radial Profiles")
 
     # --- Tab 4: PCC (metrics) ---
@@ -1363,8 +1423,8 @@ def show_analysis_results(
         tab_box = QWidget()
         tab_box_layout = QVBoxLayout(tab_box)
         tab_box_layout.setContentsMargins(6, 6, 6, 6)
-        tab_box_layout.addWidget(boxplot_controls.native)  # controls
-        tab_box_layout.addWidget(panel)                    # figure canvas panel
+        tab_box_layout.addWidget(boxplot_controls.native) 
+        tab_box_layout.addWidget(panel)                 
         tabs.addTab(tab_box, "MFI")
 
     # Only add the dock if at least one tab exists
@@ -1380,8 +1440,8 @@ def show_analysis_results(
             if dock_widget is not None:
                 # These generally work on the dock widget itself
                 dock_widget.setMinimumWidth(600)
-                dock_widget.setMinimumHeight(600)
-                dock_widget.resize(600, 600)
+                dock_widget.setMinimumHeight(700)
+                dock_widget.resize(600, 700)
         except Exception as e:
             viewer.status = f"⚠️ Could not resize Analysis Plots dock: {e}"
 
