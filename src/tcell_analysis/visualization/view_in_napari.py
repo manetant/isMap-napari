@@ -911,43 +911,68 @@ def show_analysis_results(
                     "equivalent_diameter": (float(dmin), float(dmax)),
                 })
 
+        # ---- Histograms (styled for dark/transparent background) ----
+        plt_style = {
+            "facecolor": (0, 0, 0, 0),        # transparent background
+            "edgecolor": "none"
+        }
 
-        # ---- Histograms (static) ----
         # Circularity
         fig_circ, ax_circ = plt.subplots(figsize=(4.6, 2.2))
+        fig_circ.patch.set_alpha(0.0)           # transparent figure
+        ax_circ.set_facecolor("none")           # transparent axes background
+        ax_circ.tick_params(colors="white")     # white ticks for dark theme
+        ax_circ.title.set_color("white")
+        ax_circ.xaxis.label.set_color("white")
+        ax_circ.yaxis.label.set_color("white")
+
         canvas_circ = FigureCanvas(fig_circ)
         if circ_all.size:
-            ax_circ.hist(circ_all[np.isfinite(circ_all)], bins=10)
+            ax_circ.hist(
+                circ_all[np.isfinite(circ_all)],
+                bins=10,
+                color="#4F9DF7",
+                alpha=0.6,
+                edgecolor="white"
+            )
             ax_circ.set_title("Circularity (all cells)")
             ax_circ.set_xlabel("circularity")
             ax_circ.set_ylabel("count")
-            # show initial range
-            ax_circ.axvline(c_rng[0], ls="--", alpha=0.6)
-            ax_circ.axvline(c_rng[1], ls="--", alpha=0.6)
-            fig_circ.tight_layout()
-            canvas_circ.draw_idle()
+            ax_circ.axvline(c_rng[0], ls="--", color="white", alpha=0.6)
+            ax_circ.axvline(c_rng[1], ls="--", color="white", alpha=0.6)
         else:
             ax_circ.set_title("Circularity: no data")
-            fig_circ.tight_layout()
-            canvas_circ.draw_idle()
+        fig_circ.tight_layout()
+        canvas_circ.draw_idle()
 
         # Diameter
         fig_diam, ax_diam = plt.subplots(figsize=(4.6, 2.2))
+        fig_diam.patch.set_alpha(0.0)
+        ax_diam.set_facecolor("none")
+        ax_diam.tick_params(colors="white")
+        ax_diam.title.set_color("white")
+        ax_diam.xaxis.label.set_color("white")
+        ax_diam.yaxis.label.set_color("white")
+
         canvas_diam = FigureCanvas(fig_diam)
         if diam_all.size:
-            ax_diam.hist(diam_all[np.isfinite(diam_all)], bins=50)
+            ax_diam.hist(
+                diam_all[np.isfinite(diam_all)],
+                bins=50,
+                color="#FFB347",
+                alpha=0.6,
+                edgecolor="white"
+            )
             ax_diam.set_title("Equivalent diameter (all cells)")
             ax_diam.set_xlabel("equivalent_diameter (px)")
             ax_diam.set_ylabel("count")
-            # show initial range
-            ax_diam.axvline(d_rng[0], ls="--", alpha=0.6)
-            ax_diam.axvline(d_rng[1], ls="--", alpha=0.6)
-            fig_diam.tight_layout()
-            canvas_diam.draw_idle()
+            ax_diam.axvline(d_rng[0], ls="--", color="white", alpha=0.6)
+            ax_diam.axvline(d_rng[1], ls="--", color="white", alpha=0.6)
         else:
             ax_diam.set_title("Equivalent diameter: no data")
-            fig_diam.tight_layout()
-            canvas_diam.draw_idle()
+        fig_diam.tight_layout()
+        canvas_diam.draw_idle()
+
 
         # ---- Compose a panel: sliders first, histograms below ----
         _remove_dock("Filter Cells")
