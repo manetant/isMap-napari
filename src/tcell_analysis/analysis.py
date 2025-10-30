@@ -1,6 +1,6 @@
 import gc
 import os
-# from concurrent.futures import ProcessPoolExecutor, as_completed
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import json
@@ -386,7 +386,6 @@ def process_tiff(
     seg_model = ("cyto3" if str(seg_model).lower() not in {"cyto2", "cyto3"} else str(seg_model).lower())
     seg_scale = float(np.clip(seg_scale, 0.25, 1.0))
     seg_diameter = int(max(1, seg_diameter))
-    print(f"[INFO] diameter_in_px={seg_diameter}")
 
     with timeit("cellpose segmentation"):
         masks, flows, styles, imgs_dn = segment_channel(
@@ -839,22 +838,33 @@ def process_folder(
                         progress_callback(done, total)
 
     return all_results
+    
+def _aggregate_radials_for_condition(
+    condition_root: Path,
+    tag: str,
+    channel: str,
+    *,
+    target_size=None,
+):
+    """
+    Save TWO radial output sets per (tag, channel):
+      - *_scaled.tif  : ROIs resized to a common target
+      - *_padded.tif  : ROIs centered on a canvas (no resize)
+    """
+    cond_dir = condition_root / f"res_{tag}"
+    proc_dirs = sorted(
+        p for p in condition_root.rglob("*")
+        if p.is_dir() and p.name.startswith("RadAv_" + channel)
+    )
 
-def _aggregate_radials_for_condition(condition_root: Path, tag: str, channel: str, *, scale_images="No", target_size=None):
-    cond_dir = condition_root / f"res_{tag}"   # e.g. output/Ctrl/res_Ctrl
-    proc_dirs = sorted([p for p in condition_root.rglob("*") if p.is_dir() and p.name.startswith("RadAv_"+channel)])
-    # Collect all per-ROI radials across all Process folders under this output root (for this run)
     rad_files = []
     for rd in proc_dirs:
-        # ensure this rad_dir belongs to the same tag by checking it’s under the same tree
-        # (if your outputs for multiple tags share the same output_root, you can tighten this filter)
-        rad_files += sorted([p for p in rd.glob("*.tif") if p.is_file()])
+        rad_files += sorted(p for p in rd.glob("*.tif") if p.is_file())
 
     if not rad_files:
         print(f"[INFO] No radial files for tag={tag}, channel={channel}")
         return
 
-    # Load ALL (memory heavy) or stream if large:
     imgs = [tiff.imread(str(p)).astype(np.float32) for p in rad_files]
 
     if target_size is None:
@@ -864,22 +874,23 @@ def _aggregate_radials_for_condition(condition_root: Path, tag: str, channel: st
     else:
         target = tuple(target_size)
 
-    normed = []
-    if str(scale_images).lower() == "yes":
-        for im in imgs:
-            normed.append(scale_to(im, target))
-    else:
-        for im in imgs:
-            normed.append(pad_copy_center(im, target))
+    def _write_set(kind: str, images: list[np.ndarray]):
+        suff = f"_{kind}"
+        cond_dir.mkdir(parents=True, exist_ok=True)
+        stack = np.stack(images, axis=0).astype(np.float32)
+        tiff.imwrite(str(cond_dir / f"{channel}_radStack{suff}.tif"),   stack)
+        tiff.imwrite(str(cond_dir / f"{channel}_radMontage{suff}.tif"), montage_from_stack(stack).astype(np.float32))
+        tiff.imwrite(str(cond_dir / f"{channel}_radTotAv{suff}.tif"),   stack.mean(axis=0).astype(np.float32))
 
-    stack = np.stack(normed, axis=0).astype(np.float32)
+    # 1) scaled: resize each ROI to target
+    scaled_imgs = [scale_to(im, target) for im in imgs]
+    _write_set("scaled", scaled_imgs)
 
-    cond_dir.mkdir(parents=True, exist_ok=True)
-    tiff.imwrite(str(cond_dir / f"{channel}_radStack.tif"), stack)
-    tiff.imwrite(str(cond_dir / f"{channel}_radMontage.tif"), montage_from_stack(stack).astype(np.float32))
-    tiff.imwrite(str(cond_dir / f"{channel}_radTotAv.tif"), stack.mean(axis=0).astype(np.float32))
-    print(f"[INFO] Saved in {cond_dir.name}: {channel}_radStack.tif, {channel}_radMontage.tif, {channel}_radTotAv.tif")
+    # 2) padded: center each ROI on target canvas (no resize)
+    padded_imgs = [pad_copy_center(im, target) for im in imgs]
+    _write_set("padded", padded_imgs)
 
+    print(f"[INFO] Saved radial sets in {cond_dir.name}: {channel}_*(scaled|padded).tif")
 
 def run_analysis(
         input_folder, 
@@ -948,19 +959,18 @@ def run_analysis(
         seg_scale=seg_scale,        
     )
 
-    '''
-    df = pd.DataFrame(results)
-    if not len(df):
-        print("[INFO] No results to summarize.")
-    else:
-        summary_path = os.path.join(output_root, "global_metrics_summary.csv")
-        _atomic_write_csv(df, summary_path)
-        print(f"[INFO] Summary saved to {summary_path}")
-    '''
+    # df = pd.DataFrame(results)
+    # if not len(df):
+    #     print("[INFO] No results to summarize.")
+    # else:
+    #     summary_path = os.path.join(output_root, "global_metrics_summary.csv")
+    #     _atomic_write_csv(df, summary_path)
+    #     print(f"[INFO] Summary saved to {summary_path}")
+
 
     # Aggregate radials for the chosen segmentation channel
     #radial_channels = [seg_channel] if seg_channel else ([channel_names[-1]] if channel_names else [])
     condition_root = Path(output_root) / Path(input_folder).name  # output/<condition>
     for ch in (channel_names or []):
-        _aggregate_radials_for_condition(condition_root, tag, ch, scale_images="Yes", target_size=None)
+        _aggregate_radials_for_condition(condition_root, tag, ch, target_size=None)
 

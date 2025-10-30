@@ -480,12 +480,14 @@ def show_analysis_results(
         # build channel list: start with ALL image channels
         radial_channels = list(ch_names)
 
-        # plus any extras found on disk
         for tag, cdir in cond_dirs.items():
             if not cdir.exists():
                 continue
-            for p in sorted(cdir.glob("*_radTotAv.tif")):
-                ch = p.name.replace("_radTotAv.tif", "")
+            for p in sorted(cdir.glob("*_radTotAv_scaled.tif")) + sorted(cdir.glob("*_radTotAv_padded.tif")):
+                nm = p.name
+                ch = (nm
+                    .replace("_radTotAv_scaled.tif", "")
+                    .replace("_radTotAv_padded.tif", ""))
                 if ch not in radial_channels:
                     radial_channels.append(ch)
 
@@ -502,36 +504,46 @@ def show_analysis_results(
                     colormap="gray"
                 )
 
+        def _radial_path(cdir: Path, channel: str, kind: str, scaled: bool) -> Path | None:
+            base = {"Total Average": "radTotAv", "Montage": "radMontage", "Stack": "radStack"}[kind]
+            suff = "_scaled" if scaled else "_padded"
+            p = cdir / f"{channel}_{base}{suff}.tif"
+            return p if p.exists() else None
+
         @magicgui(
             auto_call=True,
             channel={"choices": radial_channels or ["(none)"], "label": "Channel"},
             kind={"choices": ["Total Average", "Montage", "Stack"], "label": "Show"},
             tag={"choices": sorted(set(tags_valid)), "label": "Condition"},
+            scaled={"widget_type": "CheckBox", "label": "Scaled (resize to target)", "value": True},
         )
         def radial_controls(
             channel: str = radial_channels[0] if radial_channels else "(none)",
             kind: str = "Total Average",
             tag: str = sorted(set(tags_valid))[0] if tags_valid else "N/A",
+            scaled: bool = True,
         ):
             if channel == "(none)":
                 return
             cdir = cond_dirs.get(tag, None)
             if not cdir or not cdir.exists():
                 return
-            if kind == "Total Average":
-                path = cdir / f"{channel}_radTotAv.tif"
-                nm = f"Radial TotAvg – {channel} – {tag}"
-            elif kind == "Montage":
-                path = cdir / f"{channel}_radMontage.tif"
-                nm = f"Radial Montage – {channel} – {tag}"
-            else:
-                path = cdir / f"{channel}_radStack.tif"
-                nm = f"Radial Stack – {channel} – {tag}"
-            if not path.exists():
-                viewer.status = f"⚠️ Missing: {path.name}"
+
+            path = _radial_path(cdir, channel, kind, scaled)
+            if not path:
+                viewer.status = f"⚠️ Missing radial ({'scaled' if scaled else 'padded'}) for {channel}/{kind}"
                 return
+
+            nm = f"Radial {kind} – {channel} – {tag} – {'scaled' if scaled else 'padded'}"
             arr = _tiffread(str(path))
-            _upsert_image(nm, arr)
+
+            try:
+                layer = viewer.layers[nm]
+                layer.data = arr
+                layer.metadata["tcell_analysis_layers"] = True
+            except KeyError:
+                viewer.add_image(arr, name=nm, metadata={"tcell_analysis_layers": True}, colormap="gray")
+
 
         #_remove_dock("Radial Condition Viewer")
         #dock_rcv = viewer.window.add_dock_widget(radial_controls, area="right", name="Radial Condition Viewer")
@@ -560,21 +572,22 @@ def show_analysis_results(
             _profile_cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
             _legend_map = {}  # legend line -> plotted line
 
-            def _get_profile(tag: str, ch: str, x_mode: str):
-                key = (tag, ch, x_mode)
+            def _get_profile(tag: str, ch: str, x_mode: str, scaled: bool):
+                key = (tag, ch, x_mode, scaled)
                 if key in _profile_cache:
                     return _profile_cache[key]
                 cdir = cond_dirs.get(tag)
                 if not cdir or not cdir.exists():
                     return None
-                path = cdir / f"{ch}_radTotAv.tif"
-                if not path.exists():
+                path = _radial_path(cdir, ch, "Total Average", scaled)
+                if not path:
                     return None
+
                 arr = _tiffread(str(path))
                 prof = _diagonal_profile(arr, diagonal="main")
                 if prof.size == 0:
                     return None
-                
+
                 if (x_mode == "Micrometers (µm)") and (um_per_px is not None):
                     n = len(prof)
                     half = (n - 1) / 2.0
@@ -621,17 +634,19 @@ def show_analysis_results(
                 auto_call=True,
                 tag={"choices": all_tags, "label": "Condition"},
                 x_mode={"choices": ["Normalized (-1..1)", "Micrometers (µm)"], "label": "X-axis"},
+                scaled={"widget_type": "CheckBox", "label": "Scaled (resize to target)", "value": True},
             )
             def radial_line_profiles(
                 tag: str = (all_tags[0] if all_tags else "N/A"),
                 x_mode: str = "Normalized (-1..1)",
+                scaled: bool = True,
             ):
                 ax_lp.clear()
                 _legend_map.clear()
 
                 plotted_any = False
                 for ch in all_channels:
-                    xy = _get_profile(tag, ch, x_mode)
+                    xy = _get_profile(tag, ch, x_mode, scaled)
                     if xy is None:
                         continue
                     x, y = xy
@@ -639,11 +654,10 @@ def show_analysis_results(
                     plotted_any = True
 
                 if not plotted_any:
-                    ax_lp.set_title(f"No profiles available for '{tag}'")
+                    ax_lp.set_title(f"No profiles available for '{tag}' ({'scaled' if scaled else 'padded'})")
                     canvas_lp.draw_idle()
                     return
 
-                # X-axis label & limits
                 if (x_mode == "Micrometers (µm)") and (um_per_px is not None):
                     ax_lp.set_xlabel("Distance from center (µm)")
                     ax_lp.set_xlim(x.min(), x.max())
@@ -653,11 +667,12 @@ def show_analysis_results(
 
                 ax_lp.set_ylim(0.0, 1.1)
                 ax_lp.set_ylabel("MFI (normalized)")
-                ax_lp.set_title(f"Diagonal MFI — {tag}")
+                ax_lp.set_title(f"Diagonal MFI — {tag} — {'scaled' if scaled else 'padded'}")
 
                 _connect_pickable_legend()
                 fig_lp.tight_layout()
                 canvas_lp.draw_idle()
+
 
             if all_tags:
                 try:
@@ -734,7 +749,9 @@ def show_analysis_results(
 
             def _export_all_diagonals_csv():
                 try:
-                    default_csv = str((Path(output_folder) / "all_conditions_all_channels_diagonals.csv"))
+                    cur_scaled = bool(getattr(radial_line_profiles, "scaled").value) if hasattr(radial_line_profiles, "scaled") else True
+                    mode_lbl = "scaled" if cur_scaled else "padded"
+                    default_csv = str((Path(output_folder) / f"all_conditions_all_channels_diagonals_{mode_lbl}.csv"))
                     parent = getattr(viewer.window, "_qt_window", None)
                     out, _ = QFileDialog.getSaveFileName(parent, "Save ALL diagonal profiles (CSV)", default_csv, "CSV (*.csv)")
                     if not out:
@@ -746,36 +763,31 @@ def show_analysis_results(
                         if not cdir or not cdir.exists():
                             continue
                         for ch in all_channels:
-                            path = cdir / f"{ch}_radTotAv.tif"
-                            if not path.exists():
+                            path = _radial_path(cdir, ch, "Total Average", cur_scaled)
+                            if not path or not path.exists():
                                 continue
-                            try:
-                                arr = _tiffread(str(path))
-                                prof = _diagonal_profile(arr, diagonal="main")
-                                if prof.size == 0:
-                                    continue
-                                x = np.linspace(-1.0, 1.0, len(prof), dtype=float)
-                                x_norm = np.linspace(-1.0, 1.0, len(prof), dtype=float)
+                            arr = _tiffread(str(path))
+                            prof = _diagonal_profile(arr, diagonal="main")
+                            if prof.size == 0:
+                                continue
 
-                                # include µm if available
-                                if um_per_px:
-                                    half = (len(prof) - 1) / 2.0
-                                    r_um = (np.arange(len(prof), dtype=float) - half) * um_per_px
-                                else:
-                                    r_um = [None] * len(prof)
+                            x_norm = np.linspace(-1.0, 1.0, len(prof), dtype=float)
+                            if um_per_px:
+                                half = (len(prof) - 1) / 2.0
+                                r_um = (np.arange(len(prof), dtype=float) - half) * um_per_px
+                            else:
+                                r_um = [None] * len(prof)
 
-                                rows.extend({
-                                    "condition": str(tag),
-                                    "channel": str(ch),
-                                    "x_norm": float(xn),
-                                    "r_um": (float(ru) if ru is not None else None),
-                                    "mfi_norm": float(yi),
-                                } for xn, ru, yi in zip(x_norm, r_um, prof))
+                            rows.extend({
+                                "condition": str(tag),
+                                "channel": str(ch),
+                                "mode": mode_lbl,
+                                "x_norm": float(xn),
+                                "r_um": (float(ru) if ru is not None else None),
+                                "mfi_norm": float(yi),
+                            } for xn, ru, yi in zip(x_norm, r_um, prof))
 
-                            except Exception as e:
-                                viewer.status = f"Skipped {tag}/{ch}: {e}"
-
-                    df_all = pd.DataFrame(rows, columns=["condition", "channel", "x_norm", "r_um", "mfi_norm"])
+                    df_all = pd.DataFrame(rows, columns=["condition", "channel", "mode", "x_norm", "r_um", "mfi_norm"])
                     if df_all.empty:
                         viewer.status = "No diagonal profiles found to export."
                         return
@@ -783,6 +795,7 @@ def show_analysis_results(
                     viewer.status = f"Saved all diagonals to: {out}"
                 except Exception as e:
                     viewer.status = f"Export failed: {e}"
+
 
             btn_export_all.clicked.connect(_export_all_diagonals_csv)
 
