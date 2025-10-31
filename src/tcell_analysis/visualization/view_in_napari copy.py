@@ -14,13 +14,6 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from qtpy.QtWidgets import QWidget, QVBoxLayout, QTabWidget, QLabel, QSlider
 from qtpy.QtWidgets import QPushButton, QFileDialog, QHBoxLayout, QSizePolicy
 from qtpy.QtCore import Qt
-from qtpy.QtGui import QColor
-from PyQt5.QtWebEngineWidgets import QWebEngineView
-import plotly.graph_objects as go
-from matplotlib import cm
-from matplotlib.figure import Figure as _Fig
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
@@ -100,7 +93,7 @@ def reset_tcell_session(viewer):
                     _plt.close(obj.canvas.figure)
                 else:
                     # direct Figure
-                    
+                    from matplotlib.figure import Figure as _Fig
                     if isinstance(obj, _Fig):
                         import matplotlib.pyplot as _plt
                         _plt.close(obj)
@@ -179,30 +172,6 @@ def show_analysis_results(
         # strip napari's auto-suffix like "ICAM1 [1]"
         m = re.match(r"^(.*) \[\d+\]$", nm)
         return m.group(1) if m else nm
-
-    def _add_single_colorbar(fig, ax, im):
-        """Ensure exactly one colorbar is visible for the given axes."""
-        # Remove old colorbars
-        for a in list(fig.axes):
-            if a is not ax:
-                try:
-                    fig.delaxes(a)
-                except Exception:
-                    pass
-
-        # Add new colorbar with white text for dark theme
-        from mpl_toolkits.axes_grid1 import make_axes_locatable
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="4%", pad=0.04)
-        cbar = fig.colorbar(im, cax=cax)
-
-        # Style for dark background
-        cbar.ax.set_ylabel("Intensity", rotation=270, labelpad=12, color="white")
-        cbar.ax.yaxis.set_tick_params(color="white", labelcolor="white")
-        for spine in cbar.ax.spines.values():
-            spine.set_edgecolor("white")
-
-        return cbar
 
     def _purge_old_layers():
         # names we might create in this function
@@ -547,101 +516,30 @@ def show_analysis_results(
             return p if p.exists() else None
 
         # --- inside show_analysis_results ---
-        fig_radimg, ax_radimg = plt.subplots()
+        pg.setConfigOptions(imageAxisOrder="row-major")
 
-        # make the figure dark-themed like Plotly
-        fig_radimg.patch.set_facecolor("black")
-        ax_radimg.set_facecolor("black")
-        ax_radimg.tick_params(colors="white")
-        ax_radimg.title.set_color("white")
+        img_view = pg.ImageView()
+        img_view.ui.histogram.hide()
+        img_view.ui.roiBtn.hide()
+        img_view.ui.menuBtn.hide()
+        img_view.getView().setAspectLocked(True)
 
-        canvas_radimg = FigureCanvas(fig_radimg)
-        slider_z = QSlider(Qt.Horizontal)
-        slider_z.setMinimum(0)
-        slider_z.hide()  # shown only for 3D stacks
-
-        RADIAL_CMAPS = ["gray", "magma", "inferno", "viridis"]
-
-        # Add a magicgui control for colormap selection
-        @magicgui(
-            auto_call=True,
-            cmap={"choices": RADIAL_CMAPS, "label": "Colormap"},
-        )
-        def radial_colormap_control(cmap: str = "gray"):
-            """Dummy control just to pick the active colormap."""
-            return cmap
-
-        # --- Automatically refresh radial image when colormap changes ---
-        def _on_cmap_change(event=None):
-            try:
-                vals = radial_controls
-                radial_controls(
-                    channel=vals.channel.value,
-                    kind=vals.kind.value,
-                    tag=vals.tag.value,
-                    scaled=vals.scaled.value,
-                )
-            except Exception as e:
-                viewer.status = f"⚠️ Colormap update failed: {e}"
-
-        radial_colormap_control.changed.connect(_on_cmap_change)
+        # Define your default colormap (can be changed live)
+        _current_cmap = "CET-L01"
 
         def _show_radial_in_panel(path: Path, title: str):
-            arr = _tiffread(str(path))
+            arr = _tiffread(str(path)).astype(float)
+            if arr.ndim == 2:
+                arr = arr[None, :, :]
 
-            for a in list(fig_radimg.axes):
-                if a is not ax_radimg:
-                    try:
-                        fig_radimg.delaxes(a)
-                    except Exception:
-                        pass            
-            ax_radimg.clear()
-            cmap = radial_colormap_control.cmap.value
-
-            if arr.ndim == 3:  # 3D stack (Z, Y, X)
-                slider_z.show()
-                slider_z.setMaximum(arr.shape[0] - 1)
-                mid = arr.shape[0] // 2
-                slider_z.setValue(mid)
-
-                img2d = arr[mid, :, :]
-                im = ax_radimg.imshow(img2d, cmap=cmap)
-                ax_radimg.set_title(f"{title} — Slice {mid+1}/{arr.shape[0]}", 
-                                    color="white")
-                ax_radimg.axis("off")
-                _add_single_colorbar(fig_radimg, ax_radimg, im)
-                fig_radimg.tight_layout()
-                canvas_radimg.draw_idle()
-
-                def _update_slice(val):
-                    ax_radimg.clear()
-                    im = ax_radimg.imshow(arr[val, :, :], cmap=cmap)
-                    ax_radimg.set_title(f"{title} — Slice {val+1}/{arr.shape[0]}",
-                                        color="white")
-                    ax_radimg.axis("off")
-                    _add_single_colorbar(fig_radimg, ax_radimg, im)
-                    fig_radimg.tight_layout()
-                    canvas_radimg.draw_idle()
-
-                try:
-                    slider_z.valueChanged.disconnect()
-                except Exception:
-                    pass
-                slider_z.valueChanged.connect(_update_slice)
-
-            elif arr.ndim == 2:
-                slider_z.hide()
-                im = ax_radimg.imshow(arr, cmap=cmap)
-                ax_radimg.set_title(title, color="white")
-                ax_radimg.axis("off")
-                _add_single_colorbar(fig_radimg, ax_radimg, im)
-                fig_radimg.tight_layout()
-                canvas_radimg.draw_idle()
-
-            else:
-                slider_z.hide()
-                viewer.status = f"⚠️ Unexpected array shape {arr.shape} for {path.name}"
-
+            img_view.setImage(arr, axes={"t": 0, "y": 1, "x": 2})
+            try:
+                img_view.setColorMap(pg.colormap.get(_current_cmap))
+            except Exception:
+                img_view.setColorMap(pg.colormap.get("CET-L9"))  # fallback grayscale
+            img_view.setWindowTitle(title)
+            viewer.status = f"Loaded {path.name} ({arr.shape[0]} slice{'s' if arr.shape[0] > 1 else ''})"
+        
         @magicgui(
             auto_call=True,
             channel={"choices": radial_channels or ["(none)"], "label": "Channel"},
@@ -649,6 +547,7 @@ def show_analysis_results(
             tag={"choices": sorted(set(tags_valid)), "label": "Condition"},
             scaled={"widget_type": "CheckBox", "label": "Scaled (resize to target)", "value": True},
         )
+
         def radial_controls(
             channel: str = radial_channels[0] if radial_channels else "(none)",
             kind: str = "Total Average",
@@ -669,12 +568,19 @@ def show_analysis_results(
             title = f"{channel} — {kind} — {tag} — {'scaled' if scaled else 'padded'}"
             _show_radial_in_panel(path, title)
 
-        radial_colormap_control.cmap.changed.connect(lambda *_: radial_controls(
-            channel=radial_controls.channel.value,
-            kind=radial_controls.kind.value,
-            tag=radial_controls.tag.value,
-            scaled=radial_controls.scaled.value,
-        ))
+        # --- Colormap selector (separate widget) ---
+        @magicgui(
+            auto_call=True,
+            cmap={"choices": ["CET-L01", "CET-L17", "CET-L4", "grey"], "label": "Colormap"},
+        )
+        def cmap_selector(cmap: str = "CET-L01"):
+            nonlocal _current_cmap
+            _current_cmap = cmap
+            try:
+                img_view.setColorMap(pg.colormap.get(cmap))
+                viewer.status = f"Colormap changed to {cmap}"
+            except Exception as e:
+                viewer.status = f"⚠️ Failed to set colormap {cmap}: {e}"
 
         # Automatically display the first available radial image on load
         try:
@@ -706,27 +612,9 @@ def show_analysis_results(
                 m = np.nanmax(prof) if prof.size else 0.0
                 return (prof / m) if m > 0 else prof
 
-            # --- Interactive Plotly figure for Radial Profiles ---
-            fig_lp = go.Figure()
-            fig_lp.update_layout(
-                template=None,  # start from a light base so no thick white borders
-                margin=dict(l=40, r=40, t=40, b=20),
-                height=435,
-                paper_bgcolor="rgba(25,25,25,1)",
-                plot_bgcolor="rgba(35,35,35,1)",
-                font=dict(color="white"),        # make text readable on dark UI
-                xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.1)", zeroline=False),
-                yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.1)", zeroline=False),
-            )
+            fig_lp, ax_lp = plt.subplots()
+            canvas_lp = FigureCanvas(fig_lp)
 
-            view_lp = QWebEngineView()            
-            view_lp.setAttribute(Qt.WA_TranslucentBackground, True)
-            view_lp.setStyleSheet("background: transparent")
-            try:
-                # Qt ≥5.12 has this; if not, it's harmless.
-                view_lp.page().setBackgroundColor(QColor(0, 0, 0, 0))
-            except Exception:
-                pass
             # Cache profiles to avoid recomputation: {(tag, channel): (x, y)}
             _profile_cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
             _legend_map = {}  # legend line -> plotted line
@@ -800,51 +688,37 @@ def show_analysis_results(
                 x_mode: str = "Normalized (-1..1)",
                 scaled: bool = True,
             ):
-                fig_lp.data = []  # clear previous traces
+                ax_lp.clear()
+                _legend_map.clear()
 
+                plotted_any = False
                 for ch in all_channels:
                     xy = _get_profile(tag, ch, x_mode, scaled)
                     if xy is None:
                         continue
                     x, y = xy
-                    fig_lp.add_trace(go.Scatter(
-                        x=x, y=y,
-                        mode="lines",
-                        name=ch,
-                        hovertemplate=f"<b>{ch}</b><br>x=%{{x:.2f}}<br>MFI=%{{y:.3f}}<extra></extra>"
-                    ))
+                    ax_lp.plot(x, y, label=str(ch))
+                    plotted_any = True
 
-                fig_lp.update_layout(
-                    title=f"Diagonal MFI — {tag} — {'scaled' if scaled else 'padded'}",
-                    xaxis_title="Distance (µm)" if (x_mode == "Micrometers (µm)" and um_per_px) else "Distance (A.U.)",
-                    yaxis_title="Normalized MFI",
-                    template="plotly_dark",
-                )
+                if not plotted_any:
+                    ax_lp.set_title(f"No profiles available for '{tag}' ({'scaled' if scaled else 'padded'})")
+                    canvas_lp.draw_idle()
+                    return
 
-                # Render the updated plot
-                inner = fig_lp.to_html(
-                    include_plotlyjs="cdn",
-                    full_html=False,
-                    include_mathjax=False,
-                    config={"responsive": True, "displaylogo": False},
-                )
+                if (x_mode == "Micrometers (µm)") and (um_per_px is not None):
+                    ax_lp.set_xlabel("Distance from center (µm)")
+                    ax_lp.set_xlim(x.min(), x.max())
+                else:
+                    ax_lp.set_xlabel("Distance from center (A.U.)")
+                    ax_lp.set_xlim(-1.0, 1.0)
 
-                html = f"""
-                <!doctype html>
-                <html>
-                <head>
-                <meta charset="utf-8" />
-                <style>
-                html, body {{ background: transparent !important; margin:0; padding:0; }}
-                #root {{ background: transparent !important; }}
-                </style>
-                </head>
-                <body>
-                <div id="root">{inner}</div>
-                </body>
-                </html>
-                """
-                view_lp.setHtml(html)
+                ax_lp.set_ylim(0.0, 1.1)
+                ax_lp.set_ylabel("MFI (normalized)")
+                ax_lp.set_title(f"Diagonal MFI — {tag} — {'scaled' if scaled else 'padded'}")
+
+                _connect_pickable_legend()
+                fig_lp.tight_layout()
+                canvas_lp.draw_idle()
 
 
             if all_tags:
@@ -855,53 +729,74 @@ def show_analysis_results(
                     viewer.status = f"Init radial plot failed: {e}"
 
 
-            # ---- Single panel with Plotly viewer and controls ----
+            # ---- Single panel with canvas, global buttons, and export button
             panel_lp = QWidget()
-            lay_lp = QVBoxLayout(panel_lp)
-            lay_lp.setContentsMargins(6, 6, 6, 6)
-            lay_lp.addWidget(view_lp)
+            lay_lp = QVBoxLayout(panel_lp); lay_lp.setContentsMargins(6, 6, 6, 6)
+            lay_lp.addWidget(canvas_lp)
 
-            # --- Select all / Clear buttons ---
+            # Select all / Clear: toggle line visibility + legend alpha
             row_sel = QHBoxLayout()
-            btn_all = QPushButton("Select all")
+            btn_all  = QPushButton("Select all")
             btn_none = QPushButton("Clear")
             row_sel.addWidget(btn_all)
             row_sel.addWidget(btn_none)
             lay_lp.addLayout(row_sel)
 
-            # --- Export all profiles (CSV) ---
+            tip_lbl = QLabel("Tip: click legend entries to show/hide channels.")
+            tip_lbl.setWordWrap(True)
+            tip_lbl.setStyleSheet("color: #FFF; font-size: 12px; margin: 4px 0;")
+            lay_lp.addWidget(tip_lbl)
+
+            def _select_all():
+                for line in ax_lp.get_lines():
+                    line.set_visible(True)
+                for legline in _legend_map.keys():
+                    legline.set_alpha(1.0)
+                fig_lp.canvas.draw_idle()
+
+            def _clear_sel():
+                for line in ax_lp.get_lines():
+                    line.set_visible(False)
+                for legline in _legend_map.keys():
+                    legline.set_alpha(0.2)
+                fig_lp.canvas.draw_idle()
+
+            btn_all.clicked.connect(_select_all)
+            btn_none.clicked.connect(_clear_sel)
+
+            # Export all diagonals (all conditions × all channels)
             row_export = QHBoxLayout()
             btn_export_all = QPushButton("Export radial profiles (CSV)")
             row_export.addWidget(btn_export_all)
             lay_lp.addLayout(row_export)
 
-            # --- Save HTML and PNG plot ---
-            row_save = QHBoxLayout()
-            btn_save_html = QPushButton("Save plot (HTML)")
-            btn_save_png = QPushButton("Save plot (PNG)")
-            row_save.addWidget(btn_save_html)
-            row_save.addWidget(btn_save_png)
-            lay_lp.addLayout(row_save)
+            # --- Save radial profile as PNG ---
+            row_png = QHBoxLayout()
+            btn_save_radial_png = QPushButton("Save plot")
+            row_png.addWidget(btn_save_radial_png)
+            lay_lp.addLayout(row_png)
 
-            # Helper to refresh the Plotly view after changes
-            def _refresh_plotly_view():
-                html = fig_lp.to_html(include_plotlyjs="cdn", full_html=False)
-                view_lp.setHtml(html)
+            def _save_radial_png():
+                try:
+                    default_png = str((Path(output_folder) / f"radial_profile_{radial_line_profiles.tag.value}.png"))
+                    parent = getattr(viewer.window, "_qt_window", None)
+                    out, _ = QFileDialog.getSaveFileName(parent, "Save radial profile as PNG", default_png, "PNG (*.png)")
+                    if not out:
+                        return
+                    fig_lp.savefig(out, dpi=300, bbox_inches="tight")
+                    viewer.status = f"Saved radial profile PNG: {out}"
+                except Exception as e:
+                    viewer.status = f"⚠️ Save radial PNG failed: {e}"
 
-            # --- Button actions ---
-            def _select_all():
-                for tr in fig_lp.data:
-                    tr.visible = True
-                _refresh_plotly_view()
+            btn_save_radial_png.clicked.connect(_save_radial_png)
 
-            def _clear_sel():
-                for tr in fig_lp.data:
-                    tr.visible = "legendonly"
-                _refresh_plotly_view()
+            # keep refs so Qt won't GC
+            _keep_refs(btn_save_radial_png)
+            _keep_refs(tip_lbl)
 
             def _export_all_diagonals_csv():
                 try:
-                    cur_scaled = bool(radial_line_profiles.scaled.value)
+                    cur_scaled = bool(getattr(radial_line_profiles, "scaled").value) if hasattr(radial_line_profiles, "scaled") else True
                     mode_lbl = "scaled" if cur_scaled else "padded"
                     default_csv = str((Path(output_folder) / f"all_conditions_all_channels_diagonals_{mode_lbl}.csv"))
                     parent = getattr(viewer.window, "_qt_window", None)
@@ -923,10 +818,10 @@ def show_analysis_results(
                             if prof.size == 0:
                                 continue
 
-                            x_norm = np.linspace(-1.0, 1.0, len(prof))
+                            x_norm = np.linspace(-1.0, 1.0, len(prof), dtype=float)
                             if um_per_px:
                                 half = (len(prof) - 1) / 2.0
-                                r_um = (np.arange(len(prof)) - half) * um_per_px
+                                r_um = (np.arange(len(prof), dtype=float) - half) * um_per_px
                             else:
                                 r_um = [None] * len(prof)
 
@@ -939,7 +834,7 @@ def show_analysis_results(
                                 "mfi_norm": float(yi),
                             } for xn, ru, yi in zip(x_norm, r_um, prof))
 
-                    df_all = pd.DataFrame(rows)
+                    df_all = pd.DataFrame(rows, columns=["condition", "channel", "mode", "x_norm", "r_um", "mfi_norm"])
                     if df_all.empty:
                         viewer.status = "No diagonal profiles found to export."
                         return
@@ -948,39 +843,11 @@ def show_analysis_results(
                 except Exception as e:
                     viewer.status = f"Export failed: {e}"
 
-            def _save_plot_html():
-                try:
-                    default_html = str((Path(output_folder) / f"radial_profile_{radial_line_profiles.tag.value}.html"))
-                    parent = getattr(viewer.window, "_qt_window", None)
-                    out, _ = QFileDialog.getSaveFileName(parent, "Save Plotly plot as HTML", default_html, "HTML (*.html)")
-                    if not out:
-                        return
-                    fig_lp.write_html(out, include_plotlyjs="cdn")
-                    viewer.status = f"Saved HTML plot: {out}"
-                except Exception as e:
-                    viewer.status = f"Save HTML failed: {e}"
 
-            def _save_plot_png():
-                try:
-                    import plotly.io as pio
-                    default_png = str((Path(output_folder) / f"radial_profile_{radial_line_profiles.tag.value}.png"))
-                    parent = getattr(viewer.window, "_qt_window", None)
-                    out, _ = QFileDialog.getSaveFileName(parent, "Save Plotly plot as PNG", default_png, "PNG (*.png)")
-                    if not out:
-                        return
-                    pio.write_image(fig_lp, out, scale=2)
-                    viewer.status = f"Saved PNG: {out}"
-                except Exception as e:
-                    viewer.status = f"⚠️ Save PNG failed: {e}"
-
-            # --- Connect buttons ---
-            btn_all.clicked.connect(_select_all)
-            btn_none.clicked.connect(_clear_sel)
             btn_export_all.clicked.connect(_export_all_diagonals_csv)
-            btn_save_html.clicked.connect(_save_plot_html)
-            btn_save_png.clicked.connect(_save_plot_png)
 
-            _keep_refs(fig_lp, view_lp, panel_lp, btn_all, btn_none, btn_export_all, btn_save_html, btn_save_png)
+            # keep refs so Qt won't GC
+            _keep_refs(fig_lp, ax_lp, canvas_lp, btn_all, btn_none, btn_export_all, radial_line_profiles, panel_lp)
 
         except Exception as e:
             viewer.status = f"⚠️ Radial Line Profiles disabled: {e}"
@@ -1051,7 +918,7 @@ def show_analysis_results(
         if circ_all.size:
             ax_circ.hist(
                 circ_all[np.isfinite(circ_all)],
-                bins=20,
+                bins=10,
                 color="#4F9DF7",
                 alpha=0.6,
                 edgecolor="white"
@@ -1540,24 +1407,20 @@ def show_analysis_results(
         tab_radimg_layout = QVBoxLayout(tab_radimg)
         tab_radimg_layout.setContentsMargins(6, 6, 6, 6)
         tab_radimg_layout.addWidget(radial_controls.native)
-        tab_radimg_layout.addWidget(radial_colormap_control.native)
-        tab_radimg_layout.addWidget(canvas_radimg)
-        tab_radimg_layout.addWidget(slider_z) 
+        tab_radimg_layout.addWidget(cmap_selector.native)
+        tab_radimg_layout.addWidget(img_view)
         tabs.addTab(tab_radimg, "Radial Image")
 
-        _keep_refs(fig_radimg, ax_radimg, canvas_radimg, slider_z)
+        _keep_refs(img_view, cmap_selector, radial_controls)
 
-    # --- Tab 2: Radial Profiles (controls + Plotly viewer) ---
-        if radial_line_profiles is not None:
-            tab_profiles = QWidget()
-            tab_profiles_layout = QVBoxLayout(tab_profiles)
-            tab_profiles_layout.setContentsMargins(6, 6, 6, 6)
-            tab_profiles_layout.addWidget(radial_line_profiles.native)
-            tab_profiles_layout.addWidget(panel_lp)
-            tabs.addTab(tab_profiles, "Radial Profiles")
-
-            _keep_refs(fig_lp, view_lp)
-
+    # --- Tab 2: Radial Profiles (controls + canvas) ---
+    if (radial_line_profiles is not None) and (panel_lp is not None):
+        tab_profiles = QWidget()
+        tab_profiles_layout = QVBoxLayout(tab_profiles)
+        tab_profiles_layout.setContentsMargins(6, 6, 6, 6)
+        tab_profiles_layout.addWidget(radial_line_profiles.native)  
+        tab_profiles_layout.addWidget(panel_lp)                    
+        tabs.addTab(tab_profiles, "Radial Profiles")
 
     # --- Tab 4: PCC (metrics) ---
     if (pcc_controls is not None) and (panel_pcc_metrics is not None):

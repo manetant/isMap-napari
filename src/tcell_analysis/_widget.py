@@ -9,6 +9,9 @@ import pandas as pd
 from magicgui import magicgui
 from magicgui.widgets import Container, PushButton, FileEdit, Label, ComboBox, SpinBox
 
+from PyQt5 import QtCore
+QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_ShareOpenGLContexts, True)
+
 from napari.qt.threading import thread_worker
 from napari.utils import progress
 from napari import current_viewer
