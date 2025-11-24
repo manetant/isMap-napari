@@ -993,19 +993,50 @@ def show_analysis_results(
     # ---------- filtering widget (range sliders are nicer, but keep your sliders) ----------
     # defaults if not provided
     if show_filter:
-        c_rng = tuple(initial_ranges.get("circularity", (0.0, 1.0)))
-        d_rng = tuple(initial_ranges.get("equivalent_diameter", (0, 200)))
-
         # Pull full distributions once (all cells, unfiltered)
         circ_all = np.asarray(all_properties.get("circularity", np.array([])), dtype=float)
         diam_all = np.asarray(all_properties.get("equivalent_diameter", np.array([])), dtype=float)
 
+        # ---- dynamic diameter max ----
+        if diam_all.size > 0:
+            diam_max_val = float(np.nanmax(diam_all))
+            if not np.isfinite(diam_max_val) or diam_max_val <= 0:
+                diam_max_val = 200.0
+        else:
+            diam_max_val = 200.0
+
+        # round to nice number
+        diam_max_px = int(np.ceil(diam_max_val / 10.0) * 10)
+
+        # circularity range (static)
+        c_rng = tuple(initial_ranges.get("circularity", (0.0, 1.0)))
+
+        # diameter range (dynamic default)
+        if "equivalent_diameter" in initial_ranges:
+            d_rng = tuple(initial_ranges["equivalent_diameter"])
+        else:
+            d_rng = (0, diam_max_px)
+
         @magicgui(
             auto_call=True,
-            # IMPORTANT: use FloatRangeSlider for floats; RangeSlider remains for ints
-            circularity={"widget_type": "FloatRangeSlider", "min": 0.0, "max": 1.0, "step": 0.1, "value": c_rng, "label": "Circularity"},
-            diameter={"widget_type": "RangeSlider", "min": 0, "max": 200, "step": 10, "value": d_rng, "label": "Eq. Diam (px)"},
-        )    
+            circularity={
+                "widget_type": "FloatRangeSlider",
+                "min": 0.0,
+                "max": 1.0,
+                "step": 0.1,
+                "value": c_rng,
+                "label": "Circularity",
+            },
+            diameter={
+                "widget_type": "RangeSlider",
+                "min": 0,
+                "max": diam_max_px,
+                "step": 10,
+                "value": d_rng,
+                "label": "Eq. Diam (px)",
+            },
+        )
+
         def filter_points(circularity, diameter):
             circ = all_properties.get("circularity")
             diam = all_properties.get("equivalent_diameter")
