@@ -1,7 +1,7 @@
 [project]
 name = "predict-tcell"
 dynamic = ["version"]
-description = "T-cell activation analysis and visualization"
+description = "isMap (immunological synapse map analysis program)"
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [
@@ -37,12 +37,10 @@ dependencies = [
     "opencv-python",
     "cellpose==3.1.1.2",
     "tqdm",
-    "napari[all]",
     "magicgui",
     "qtpy",
     "pyqtgraph",
     "plotly",
-    "PyQtWebEngine",
     "scikit-image==0.25.2",
     "scikit-learn",
     "tifffile",
@@ -56,15 +54,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Allow easily installation with the full, default napari installation
-# (including Qt backend) using predict-tcell[all].
-all = ["napari[all]"]
+# Full install, including napari and Qt stack
+gui = [
+    "napari[all]",
+    "PyQtWebEngine",  # brings in PyQt5 on pip
+]
 testing = [
     "tox",
-    "pytest",  # https://docs.pytest.org/en/latest/contents.html
-    "pytest-cov",  # https://pytest-cov.readthedocs.io/en/latest/
-    "pytest-qt",  # https://pytest-qt.readthedocs.io/en/latest/
-    "napari[qt]",  # test with napari's default Qt bindings
+    "pytest",
+    "pytest-cov",
+    "pytest-qt",
+    "napari[qt]",
 ]
 
 [project.entry-points."napari.manifest"]
