@@ -5,6 +5,7 @@ from typing import Dict, List, Tuple
 
 import os
 import pandas as pd
+import json
 
 from magicgui import magicgui
 from magicgui.widgets import Container, PushButton, FileEdit, Label, ComboBox, SpinBox
@@ -29,7 +30,7 @@ from .analysis import run_analysis
 from .visualization.view_in_napari import show_analysis_results
 from napari import current_viewer
 from .visualization.view_in_napari import reset_tcell_session  # make sure this import is present
-from qtpy.QtWidgets import QLineEdit, QMessageBox
+from qtpy.QtWidgets import QLineEdit, QMessageBox, QFileDialog
 import time
 from qtpy.QtCore import QTimer
 from qtpy.QtGui import QPixmap
@@ -678,14 +679,136 @@ def tcell_widget():
                 if primary.tag.strip():
                     tasks.append((base, primary.tag))
         return tasks
-
+    
+    # ---------- LOAD EXISTING ANALYSIS ----------
     @load_btn.changed.connect
     def _load_data(_=None):
         viewer = current_viewer()
-        if viewer:
-            viewer.status = "⏳ In progress ..."
-        QMessageBox.information(viewer.window._qt_window if viewer else None,
-                                "Load data", "In progress ...")    
+        if viewer is None:
+            return
+
+        parent = getattr(viewer, "window", None)
+        parent = getattr(parent, "_qt_window", None)
+
+        # Ask user for the result folder
+        # Use current output_folder (if set) as starting point
+        start_dir = str(form.output_folder.value) if form.output_folder.value else str(Path.home())
+
+        folder = QFileDialog.getExistingDirectory(
+            parent,
+            "Select analysis result folder",
+            start_dir,
+        )
+
+        # User cancelled
+        if not folder:
+            try:
+                viewer.status = "ℹ️ Load data cancelled."
+            except Exception:
+                pass
+            return
+
+        out_dir = Path(folder)
+        # keep the form in sync with what the user picked
+        form.output_folder.value = out_dir
+
+        # Validate that this looks like an analysis output folder
+        run_json = out_dir / "run.json"
+        if not run_json.exists():
+            if parent is not None:
+                QMessageBox.warning(
+                    parent,
+                    "Load data",
+                    f"No 'run.json' found in:\n{out_dir}\n\n"
+                    "Please select the root output folder used when you ran the analysis.",
+                )
+            try:
+                viewer.status = "⚠️ Selected folder does not look like an analysis output folder."
+            except Exception:
+                pass
+            return
+
+        # Read channel names from run.json
+        try:
+            meta = json.loads(run_json.read_text())
+            chan_list = meta.get("channels") or []
+        except Exception as e:
+            if parent is not None:
+                QMessageBox.critical(
+                    parent,
+                    "Load data",
+                    f"Failed to read 'run.json':\n{e}",
+                )
+            try:
+                viewer.status = "⚠️ Could not read run.json."
+            except Exception:
+                pass
+            return
+
+        if not chan_list:
+            if parent is not None:
+                QMessageBox.warning(
+                    parent,
+                    "Load data",
+                    "The 'run.json' file does not contain a 'channels' list.",
+                )
+            try:
+                viewer.status = "⚠️ No channel information in run.json."
+            except Exception:
+                pass
+            return
+
+        # Check that there is at least one mask to visualize
+        mask_hits = list(out_dir.rglob("*_mask.tiff"))
+        if not mask_hits:
+            if parent is not None:
+                QMessageBox.warning(
+                    parent,
+                    "Load data",
+                    "No '*_mask.tiff' files found under this folder; nothing to visualize.",
+                )
+            try:
+                viewer.status = "⚠️ No masks found in this folder."
+            except Exception:
+                pass
+            return
+
+        # Load into isMap visualization ---
+        try:
+            viewer.status = "📂 Loading existing analysis..."
+        except Exception:
+            pass
+
+        try:
+            show_analysis_results(
+                viewer,
+                out_dir,
+                chan_list,
+                tasks_with_tags=[],      # currently unused by show_analysis_results
+                initial_ranges={},
+                on_filter_change=None,
+                show_filter=False,       # behave like 'Run Analysis' (full QC, no filter sliders)
+                show_boxplot=True,
+                show_radial_viewer=True,
+                show_pcc=True,
+                um_per_px=um_per_px_global,  # will be None if we never estimated µm/px
+            )
+            try:
+                viewer.status = "✅ Loaded existing analysis."
+            except Exception:
+                pass
+        except Exception as e:
+            if parent is not None:
+                QMessageBox.critical(
+                    parent,
+                    "Load data",
+                    f"Failed to visualize analysis from:\n{out_dir}\n\nError:\n{e}",
+                )
+            try:
+                viewer.status = f"❌ Failed to load analysis: {e}"
+            except Exception:
+                pass
+  
     # ---------- RUN SEGMENTATION (pilot) ----------
     @run_seg_btn.changed.connect
     def _run_segmentation(_=None):
