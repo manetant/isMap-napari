@@ -61,7 +61,7 @@ python -m venv .venv-predict
 ### 3. Install the plugin
 From inside the repo:
 ```bash
-pip install -e .[all]
+pip install "predict-tcell[gui]"
 ```
 
 ### 4. Validate installation
