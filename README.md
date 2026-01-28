@@ -1,13 +1,13 @@
 # isMap (immunological synapse map analysis program)
 
-This repository provides a **Napari plugin** for analyzing T-cell activation from microscopy images.  
+This repository provides a **isMap-Napari** plugin for analyzing T-cell activation from microscopy images.  
 It integrates **data preprocessing, segmentation, feature extraction, and interactive visualization** in a single workflow.
 
 ---
 
 ## ✨ Features
 
-- **ND2 → TIFF conversion**
+- **TIFF conversion**
 - **Background correction** (e.g. rolling ball for ICAM1 channel)
 - **T-cell segmentation** with [Cellpose](https://www.cellpose.org/) (including denoising models)
 - **Per-cell feature extraction** (intensity metrics, shape, circularity, etc.)
@@ -16,23 +16,23 @@ It integrates **data preprocessing, segmentation, feature extraction, and intera
   - Image + mask overlay  
   - Per-cell properties and text labels  
   - Filtering by shape features  
-  - Export filtered results as CSV  
+  - Export results as CSV  
 
 ---
 
 ## 📂 Project Structure
 
 ```bash
-predict-tcell/         # Python package (Napari plugin)
-├── src/predict_tcell  # Source code
-│   ├── analysis.py    # Main analysis pipeline
-│   ├── preprocessing/ # Background correction etc.
-│   ├── masking/       # Segmentation (Cellpose)
-│   ├── metrics.py     # Per-cell features
-│   ├── visualization/ # Napari visualization
-│   ├── _widget.py     # Napari widget definition
-│   └── napari.yaml    # Plugin manifest
-└── test_data/         # Example input files
+ismap-napari/           # Python package (Napari plugin)
+├── src/tcell_analysis  # Source code
+│   ├── analysis.py     # Main analysis pipeline
+│   ├── preprocessing/  # Background correction etc.
+│   ├── masking/        # Segmentation (Cellpose)
+│   ├── metrics.py      # Per-cell features
+│   ├── visualization/  # Napari visualization
+│   ├── _widget.py      # Napari widget definition
+│   └── napari.yaml     # Plugin manifest
+└── test_data/          # Example input files
 ```
 
 ---
@@ -41,36 +41,36 @@ predict-tcell/         # Python package (Napari plugin)
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/.../predict_tcell_plugin.git
-cd predict_tcell_plugin/predict-tcell
+git clone https://github.com/.../isMap-napari.git
+cd isMap-napari
 ```
 
 ### 2. Create and activate a virtual environment
 Linux/macOS:
 ```bash
-python3 -m venv .venv-predict
-source .venv-predict/bin/activate
+python3 -m venv .venv-ismap
+source .venv-ismap/bin/activate
 ```
 
 Windows (PowerShell):
 ```powershell
-python -m venv .venv-predict
-.venv-predict\Scripts\Activate.ps1
+python -m venv .venv-ismap
+.venv-ismap\Scripts\Activate.ps1
 ```
 
 ### 3. Install the plugin
 From inside the repo:
 ```bash
-pip install "predict-tcell[gui]"
+pip install -e ".[gui]"
 ```
 
 ### 4. Validate installation
 ```bash
-npe2 validate predict-tcell
+npe2 validate ismap-napari
 ```
 You should see:
 ```
-✔ Manifest for 'Predict T Cell' valid!
+✔ Manifest for 'immunological synapse Map analysis program' valid!
 ```
 
 ---
