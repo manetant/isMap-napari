@@ -97,7 +97,6 @@ def timeit(msg):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         dt = (time.perf_counter() - t0) * 1000
-        print(f"[TIMER] {msg}: {dt:.1f} ms")
 
 @contextmanager
 def timeit_cpu(msg: str):
@@ -106,7 +105,6 @@ def timeit_cpu(msg: str):
         yield
     finally:
         dt = (time.perf_counter() - t0) * 1000
-        print(f"[TIMER] {msg}: {dt:.1f} ms")
 
 @contextmanager
 def timeit_gpu(msg: str):
@@ -119,7 +117,6 @@ def timeit_gpu(msg: str):
         if torch.cuda.is_available():
             torch.cuda.synchronize()   # include only the GPU work in this block
         dt = (time.perf_counter() - t0) * 1000
-        print(f"[TIMER] {msg}: {dt:.1f} ms")
 
 CODE_VERSION = "2025-09-17.1"
 
@@ -483,7 +480,6 @@ def process_tiff(
     features_df = features_df[first_cols + other_cols]
 
     csv_out = os.path.join(os.path.dirname(tiff_path), "per_cell_features.csv")
-    print(f"[INFO] Writing per-cell features to: {csv_out}")
     _atomic_write_csv(features_df, csv_out)
 
     # Build a mask that contains ONLY the selected labels for downstream metrics
@@ -542,7 +538,6 @@ def process_tiff(
                 rad = radial_average_ring(roi2d).astype(np.float32, copy=False)
                 tiff.imwrite(str(rad_dir / f"Cell_{int(lab):05d}_radAv.tif"),rad)
                 # save a PNG too
-                print('DEBUG: Saving radial PNG for Cell', int(lab))
                 png_path = str(rad_dir / f"Cell_{int(lab):05d}_radAv.png")
                 _atomic_write_png((rad / rad.max() * 255).astype(np.uint8, copy=False), png_path)
 
@@ -612,7 +607,6 @@ def process_image_file(
     ):
     case_name = os.path.splitext(os.path.basename(file_path))[0]
     print(f"[INFO] ➤ Processing case: {case_name}")
-    print('here1')
     condition_name = Path(input_root).name  # e.g. "Ctrl" or "Nivo"
     relative_folder = os.path.relpath(os.path.dirname(file_path), start=input_root)  # path under the condition
     output_folder = os.path.join(output_root, condition_name, relative_folder)
@@ -659,9 +653,6 @@ def process_image_file(
     try:
         
         # Load, collapse Z by max projection, save per-channel TIFFs
-        print(channel_rename_map)
-        print(channel_names)
-
 
         cyx, seg_raw, out_paths, channel_names, px_size  = read_any_to_cyx(
             file_path,
@@ -890,7 +881,7 @@ def _aggregate_radials_for_condition(
     padded_imgs = [pad_copy_center(im, target) for im in imgs]
     _write_set("padded", padded_imgs)
 
-    print(f"[INFO] Saved radial sets in {cond_dir.name}: {channel}_*(scaled|padded).tif")
+    #print(f"[INFO] Saved radial sets in {cond_dir.name}: {channel}_*(scaled|padded).tif")
 
 def run_analysis(
         input_folder, 

@@ -117,7 +117,7 @@ def read_any_to_cyx(
         px_meta: {"X": float|None, "Y": float|None, "unit": str}
     '''
 
-    print(f"Reading {file_path} ...")
+    #print(f"Reading {file_path} ...")
 
     # Quiet bioformats logging
     os.environ["SCIJAVA_LOG_LEVEL"] = "error"
@@ -223,8 +223,6 @@ def read_any_to_cyx(
 
     # Which index is segmentation channel in this final ordering?
     seg_idx = _resolve_seg_index(final_names, seg_channel)
-    print(f"Segmentation channel: {seg_channel}")
-    print(f"Final channels: {final_names}, seg_idx={seg_idx}")
 
     # grab raw seg plane only
     seg_raw = None
