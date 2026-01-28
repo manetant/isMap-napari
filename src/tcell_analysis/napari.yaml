@@ -1,10 +1,10 @@
-name: predict-tcell
+name: isMap-napari
 display_name: immunological synapse Map analysis program
 contributions:
   commands:
-    - id: predict-tcell.tcell_widget
+    - id: isMap-napari.tcell_widget
       python_name: tcell_analysis._widget:tcell_widget
       title: Run isMap
   widgets:
-    - command: predict-tcell.tcell_widget
+    - command: isMap-napari.tcell_widget
       display_name: isMap

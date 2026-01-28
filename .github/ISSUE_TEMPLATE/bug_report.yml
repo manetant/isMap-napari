@@ -1,5 +1,5 @@
 name: "\U0001F41B Bug Report"
-description: Report a bug encountered while using predict-tcell
+description: Report a bug encountered while using isMap-napari
 labels:
   - "bug"
 

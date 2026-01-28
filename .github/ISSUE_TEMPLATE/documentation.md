@@ -1,6 +1,6 @@
 ---
 name: "\U0001F4DA Documentation"
-about: Report an issue with predict-tcell documentation
+about: Report an issue with isMap-napari documentation
 title: ''
 labels: documentation
 assignees: ''

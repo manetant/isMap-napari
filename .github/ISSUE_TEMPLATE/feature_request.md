@@ -1,6 +1,6 @@
 ---
 name: "\U0001F680 Feature Request"
-about: Submit a proposal/request for a new predict-tcell feature
+about: Submit a proposal/request for a new isMap-napari feature
 title: ''
 labels: feature
 assignees: ''
