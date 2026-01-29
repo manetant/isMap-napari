@@ -4,7 +4,7 @@ contributions:
   commands:
     - id: isMap-napari.tcell_widget
       python_name: tcell_analysis._widget:tcell_widget
-      title: Run isMap
+      title: isMap (immunological synapse Map analysis program)
   widgets:
     - command: isMap-napari.tcell_widget
       display_name: isMap
