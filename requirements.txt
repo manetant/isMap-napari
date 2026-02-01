@@ -5,7 +5,7 @@ scikit-image
 opencv-python
 nd2reader
 seaborn
-cellpose==3.1.1.2
+cellpose==4.0.8
 tqdm
 psutil
 tifffile
