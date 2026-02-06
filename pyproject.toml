@@ -40,7 +40,6 @@ dependencies = [
     "magicgui",
     "qtpy",
     "pyqtgraph",
-    "plotly",
     "scikit-image==0.25.2",
     "scikit-learn",
     "tifffile",
@@ -56,9 +55,10 @@ dependencies = [
 [project.optional-dependencies]
 # Full install, including napari and Qt stack
 gui = [
-    "napari[all]",
-    "PyQtWebEngine",  # brings in PyQt5 on pip
+    "napari>=0.4.19",
+    "PyQt5"
 ]
+
 testing = [
     "tox",
     "pytest",
@@ -91,7 +91,7 @@ fallback_version = "0.0.1+nogit"
 
 [tool.black]
 line-length = 79
-target-version = ['py310', 'py311', 'py312', 'py313']
+target-version = ['py310', 'py311', 'py312']
 
 [tool.ruff]
 line-length = 79

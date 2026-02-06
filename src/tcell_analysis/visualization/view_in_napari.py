@@ -5,6 +5,7 @@ import pandas as pd
 import re as _re
 from tifffile import imread
 from tifffile import imread as _tiffread
+#import dask.array as daQtWebEngineWidgets
 import dask.array as da
 from dask import delayed
 from magicgui import magicgui
@@ -15,8 +16,8 @@ from qtpy.QtWidgets import QWidget, QVBoxLayout, QTabWidget, QLabel, QSlider
 from qtpy.QtWidgets import QPushButton, QFileDialog, QHBoxLayout, QSizePolicy
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QColor
-from PyQt5.QtWebEngineWidgets import QWebEngineView
-import plotly.graph_objects as go
+#from PyQt5.QtWebEngineWidgets import QWebEngineView
+#import plotly.graph_objects as go
 from matplotlib import cm
 from matplotlib.figure import Figure as _Fig
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -649,7 +650,7 @@ def show_analysis_results(
             tag={"choices": sorted(set(tags_valid)), "label": "Condition"},
             scaled={"widget_type": "CheckBox", "label": "Scaled (resize to target)", "value": True},
         )
-        def radial_controls(
+        def _radial_controls_impl(
             channel: str = radial_channels[0] if radial_channels else "(none)",
             kind: str = "Total Average",
             tag: str = sorted(set(tags_valid))[0] if tags_valid else "N/A",
@@ -669,6 +670,7 @@ def show_analysis_results(
             title = f"{channel} — {kind} — {tag} — {'scaled' if scaled else 'padded'}"
             _show_radial_in_panel(path, title)
 
+        radial_controls = _radial_controls_impl 
         radial_colormap_control.cmap.changed.connect(lambda *_: radial_controls(
             channel=radial_controls.channel.value,
             kind=radial_controls.kind.value,
@@ -692,295 +694,178 @@ def show_analysis_results(
 
         try:
             # ==== Radial Line Profiles (MFI normalized along a diagonal) ====
+            # ==== Radial Line Profiles (Matplotlib, cross-platform) ====
+
             def _diagonal_profile(img2d: np.ndarray, diagonal: str = "main") -> np.ndarray:
                 if img2d.ndim != 2:
-                    raise ValueError("radTotAv image must be 2D")
+                    raise ValueError("Expected 2D image for radial profile")
                 if diagonal == "anti":
                     img2d = np.fliplr(img2d)
-                H, W = img2d.shape
-                n = min(H, W)
-                y0 = (H - n) // 2
-                x0 = (W - n) // 2
-                sub = img2d[y0:y0 + n, x0:x0 + n]
-                prof = np.diag(sub).astype(np.float64, copy=False)
-                m = np.nanmax(prof) if prof.size else 0.0
-                return (prof / m) if m > 0 else prof
 
-            # --- Interactive Plotly figure for Radial Profiles ---
-            fig_lp = go.Figure()
-            fig_lp.update_layout(
-                template=None,  # start from a light base so no thick white borders
-                margin=dict(l=40, r=40, t=40, b=20),
-                height=435,
-                paper_bgcolor="rgba(25,25,25,1)",
-                plot_bgcolor="rgba(35,35,35,1)",
-                font=dict(color="white"),        # make text readable on dark UI
-                xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.1)", zeroline=False),
-                yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.1)", zeroline=False),
+                n = min(img2d.shape)
+                y0 = (img2d.shape[0] - n) // 2
+                x0 = (img2d.shape[1] - n) // 2
+                sub = img2d[y0:y0+n, x0:x0+n]
+
+                prof = np.diag(sub).astype(np.float64, copy=False)
+                m = np.nanmax(prof)
+                return prof / m if m > 0 else prof
+
+
+            # ---- Figure ----
+            fig_lp, ax_lp = plt.subplots(figsize=(6, 4))
+            fig_lp.patch.set_facecolor("#111111")
+            ax_lp.set_facecolor("#111111")
+
+            ax_lp.tick_params(
+                axis="both",
+                colors="white",
+                labelsize=9,
             )
 
-            view_lp = QWebEngineView()            
-            view_lp.setAttribute(Qt.WA_TranslucentBackground, True)
-            view_lp.setStyleSheet("background: transparent")
-            try:
-                # Qt ≥5.12 has this; if not, it's harmless.
-                view_lp.page().setBackgroundColor(QColor(0, 0, 0, 0))
-            except Exception:
-                pass
-            # Cache profiles to avoid recomputation: {(tag, channel): (x, y)}
-            _profile_cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
-            _legend_map = {}  # legend line -> plotted line
+            for spine in ax_lp.spines.values():
+                spine.set_color("white")
 
-            def _get_profile(tag: str, ch: str, x_mode: str, scaled: bool):
-                key = (tag, ch, x_mode, scaled)
-                if key in _profile_cache:
-                    return _profile_cache[key]
-                cdir = cond_dirs.get(tag)
-                if not cdir or not cdir.exists():
-                    return None
-                path = _radial_path(cdir, ch, "Total Average", scaled)
-                if not path:
-                    return None
+            ax_lp.xaxis.label.set_color("white")
+            ax_lp.yaxis.label.set_color("white")
+            ax_lp.title.set_color("white")
 
-                arr = _tiffread(str(path))
-                prof = _diagonal_profile(arr, diagonal="main")
-                if prof.size == 0:
-                    return None
+            ax_lp.grid(True, color="white", alpha=0.15, linewidth=0.5)
 
-                if (x_mode == "Micrometers (µm)") and (um_per_px is not None):
-                    n = len(prof)
-                    half = (n - 1) / 2.0
-                    x = (np.arange(n, dtype=float) - half) * um_per_px
-                else:
-                    x = np.linspace(-1.0, 1.0, len(prof), dtype=float)
-
-                _profile_cache[key] = (x, prof)
-                return _profile_cache[key]
-
-            def _connect_pickable_legend():
-                # one column, top-right
-                leg = ax_lp.legend(
-                    loc="upper right",  
-                    ncol=1,             
-                    fontsize=8,
-                    frameon=True,
-                )
-                for legline, origline in zip(leg.get_lines(), ax_lp.get_lines()):
-                    legline.set_picker(True)
-                    legline.set_pickradius(5)
-                    _legend_map[legline] = origline
-
-                def _on_pick(event):
-                    legline = event.artist
-                    line = _legend_map.get(legline)
-                    if line is None:
-                        return
-                    vis = not line.get_visible()
-                    line.set_visible(vis)
-                    # fade legend item when hidden
-                    legline.set_alpha(1.0 if vis else 0.25)
-                    fig_lp.canvas.draw_idle()
-
-                if not hasattr(fig_lp.canvas, "_legend_pick_connected"):
-                    fig_lp.canvas.mpl_connect("pick_event", _on_pick)
-                    fig_lp.canvas._legend_pick_connected = True
+            canvas_lp = FigureCanvas(fig_lp)
 
 
+            # ---- Controls ----
             all_tags = sorted(set(tags_valid))
-            all_channels = sorted(set(radial_channels))
+            all_channels = sorted(radial_channels)
 
             @magicgui(
                 auto_call=True,
                 tag={"choices": all_tags, "label": "Condition"},
                 x_mode={"choices": ["Normalized (-1..1)", "Micrometers (µm)"], "label": "X-axis"},
-                scaled={"widget_type": "CheckBox", "label": "Scaled (resize to target)", "value": True},
+                scaled={"widget_type": "CheckBox", "label": "Scaled", "value": True},
             )
             def radial_line_profiles(
-                tag: str = (all_tags[0] if all_tags else "N/A"),
+                tag: str = all_tags[0],
                 x_mode: str = "Normalized (-1..1)",
                 scaled: bool = True,
             ):
-                fig_lp.data = []  # clear previous traces
+                ax_lp.clear()
+                ax_lp.set_facecolor("black")
+
+                plotted = False
 
                 for ch in all_channels:
-                    xy = _get_profile(tag, ch, x_mode, scaled)
-                    if xy is None:
+                    cdir = cond_dirs.get(tag)
+                    if not cdir or not cdir.exists():
                         continue
-                    x, y = xy
-                    fig_lp.add_trace(go.Scatter(
-                        x=x, y=y,
-                        mode="lines",
-                        name=ch,
-                        hovertemplate=f"<b>{ch}</b><br>x=%{{x:.2f}}<br>MFI=%{{y:.3f}}<extra></extra>"
-                    ))
 
-                fig_lp.update_layout(
-                    title=f"Diagonal MFI — {tag} — {'scaled' if scaled else 'padded'}",
-                    xaxis_title="Distance (µm)" if (x_mode == "Micrometers (µm)" and um_per_px) else "Distance (A.U.)",
-                    yaxis_title="Normalized MFI",
-                    template="plotly_dark",
-                )
+                    path = _radial_path(cdir, ch, "Total Average", scaled)
+                    if not path:
+                        continue
 
-                # Render the updated plot
-                inner = fig_lp.to_html(
-                    include_plotlyjs="cdn",
-                    full_html=False,
-                    include_mathjax=False,
-                    config={"responsive": True, "displaylogo": False},
-                )
+                    arr = _tiffread(str(path))
+                    prof = _diagonal_profile(arr)
+                    if prof.size == 0:
+                        continue
 
-                html = f"""
-                <!doctype html>
-                <html>
-                <head>
-                <meta charset="utf-8" />
-                <style>
-                html, body {{ background: transparent !important; margin:0; padding:0; }}
-                #root {{ background: transparent !important; }}
-                </style>
-                </head>
-                <body>
-                <div id="root">{inner}</div>
-                </body>
-                </html>
-                """
-                view_lp.setHtml(html)
+                    if x_mode == "Micrometers (µm)" and um_per_px:
+                        half = (len(prof) - 1) / 2
+                        x = (np.arange(len(prof)) - half) * um_per_px
+                        xlabel = "Distance (µm)"
+                    else:
+                        x = np.linspace(-1, 1, len(prof))
+                        xlabel = "Distance (normalized)"
+
+                    ax_lp.plot(x, prof, label=ch)
+                    plotted = True
+
+                if not plotted:
+                    ax_lp.set_title("No radial profiles available", color="white")
+                else:
+                    ax_lp.set_title(f"Radial Profiles — {tag}", color="white")
+                    ax_lp.set_xlabel(xlabel)
+                    ax_lp.set_ylabel("Normalized MFI")
+                    ax_lp.legend(fontsize=8, facecolor="black", labelcolor="white")
+
+                fig_lp.tight_layout()
+                canvas_lp.draw_idle()
 
 
-            if all_tags:
-                try:
-                    # call once with the first condition to trigger plotting
-                    radial_line_profiles(tag=all_tags[0])
-                except Exception as e:
-                    viewer.status = f"Init radial plot failed: {e}"
+            # ---- Export buttons ----
+            btn_row = QHBoxLayout()
+            btn_save_png = QPushButton("Save PNG")
+            btn_save_csv = QPushButton("Export CSV")
+            btn_row.addWidget(btn_save_png)
+            btn_row.addWidget(btn_save_csv)
+
+            # ---- Force initial radial profile render ----
+            try:
+                if all_tags:
+                    radial_line_profiles(
+                        tag=all_tags[0],
+                        x_mode="Normalized (-1..1)",
+                        scaled=True,
+                    )
+            except Exception as e:
+                viewer.status = f"⚠️ Radial profile init failed: {e}"
+
+            def _save_radial_png():
+                out = Path(output_folder) / f"radial_profiles_{radial_line_profiles.tag.value}.png"
+                fig_lp.savefig(out, dpi=300, bbox_inches="tight")
+                viewer.status = f"Saved: {out}"
 
 
-            # ---- Single panel with Plotly viewer and controls ----
+            def _export_radial_csv():
+                rows = []
+                tag = radial_line_profiles.tag.value
+                scaled = radial_line_profiles.scaled.value
+
+                for ch in all_channels:
+                    cdir = cond_dirs.get(tag)
+                    if not cdir:
+                        continue
+
+                    path = _radial_path(cdir, ch, "Total Average", scaled)
+                    if not path:
+                        continue
+
+                    arr = _tiffread(str(path))
+                    prof = _diagonal_profile(arr)
+                    if prof.size == 0:
+                        continue
+
+                    for i, v in enumerate(prof):
+                        rows.append({
+                            "condition": tag,
+                            "channel": ch,
+                            "index": i,
+                            "mfi_norm": float(v),
+                        })
+
+                if not rows:
+                    viewer.status = "No data to export"
+                    return
+
+                df = pd.DataFrame(rows)
+                out = Path(output_folder) / f"radial_profiles_{tag}.csv"
+                df.to_csv(out, index=False)
+                viewer.status = f"Saved: {out}"
+
+
+            btn_save_png.clicked.connect(_save_radial_png)
+            btn_save_csv.clicked.connect(_export_radial_csv)
+
+
+            # ---- Panel ----
             panel_lp = QWidget()
-            lay_lp = QVBoxLayout(panel_lp)
-            lay_lp.setContentsMargins(6, 6, 6, 6)
-            lay_lp.addWidget(view_lp)
+            layout_lp = QVBoxLayout(panel_lp)
+            layout_lp.setContentsMargins(6, 6, 6, 6)
+            layout_lp.addWidget(radial_line_profiles.native)
+            layout_lp.addWidget(canvas_lp)
+            layout_lp.addLayout(btn_row)
 
-            # --- Select all / Clear buttons ---
-            row_sel = QHBoxLayout()
-            btn_all = QPushButton("Select all")
-            btn_none = QPushButton("Clear")
-            row_sel.addWidget(btn_all)
-            row_sel.addWidget(btn_none)
-            lay_lp.addLayout(row_sel)
-
-            # --- Export all profiles (CSV) ---
-            row_export = QHBoxLayout()
-            btn_export_all = QPushButton("Export radial profiles (CSV)")
-            row_export.addWidget(btn_export_all)
-            lay_lp.addLayout(row_export)
-
-            # --- Save HTML and PNG plot ---
-            row_save = QHBoxLayout()
-            btn_save_html = QPushButton("Save plot (HTML)")
-            btn_save_png = QPushButton("Save plot (PNG)")
-            row_save.addWidget(btn_save_html)
-            row_save.addWidget(btn_save_png)
-            lay_lp.addLayout(row_save)
-
-            # Helper to refresh the Plotly view after changes
-            def _refresh_plotly_view():
-                html = fig_lp.to_html(include_plotlyjs="cdn", full_html=False)
-                view_lp.setHtml(html)
-
-            # --- Button actions ---
-            def _select_all():
-                for tr in fig_lp.data:
-                    tr.visible = True
-                _refresh_plotly_view()
-
-            def _clear_sel():
-                for tr in fig_lp.data:
-                    tr.visible = "legendonly"
-                _refresh_plotly_view()
-
-            def _export_all_diagonals_csv():
-                try:
-                    cur_scaled = bool(radial_line_profiles.scaled.value)
-                    mode_lbl = "scaled" if cur_scaled else "padded"
-                    default_csv = str((Path(output_folder) / f"all_conditions_all_channels_diagonals_{mode_lbl}.csv"))
-                    parent = getattr(viewer.window, "_qt_window", None)
-                    out, _ = QFileDialog.getSaveFileName(parent, "Save ALL diagonal profiles (CSV)", default_csv, "CSV (*.csv)")
-                    if not out:
-                        return
-
-                    rows = []
-                    for tag in sorted(cond_dirs.keys()):
-                        cdir = cond_dirs.get(tag)
-                        if not cdir or not cdir.exists():
-                            continue
-                        for ch in all_channels:
-                            path = _radial_path(cdir, ch, "Total Average", cur_scaled)
-                            if not path or not path.exists():
-                                continue
-                            arr = _tiffread(str(path))
-                            prof = _diagonal_profile(arr, diagonal="main")
-                            if prof.size == 0:
-                                continue
-
-                            x_norm = np.linspace(-1.0, 1.0, len(prof))
-                            if um_per_px:
-                                half = (len(prof) - 1) / 2.0
-                                r_um = (np.arange(len(prof)) - half) * um_per_px
-                            else:
-                                r_um = [None] * len(prof)
-
-                            rows.extend({
-                                "condition": str(tag),
-                                "channel": str(ch),
-                                "mode": mode_lbl,
-                                "x_norm": float(xn),
-                                "r_um": (float(ru) if ru is not None else None),
-                                "mfi_norm": float(yi),
-                            } for xn, ru, yi in zip(x_norm, r_um, prof))
-
-                    df_all = pd.DataFrame(rows)
-                    if df_all.empty:
-                        viewer.status = "No diagonal profiles found to export."
-                        return
-                    df_all.to_csv(out, index=False)
-                    viewer.status = f"Saved all diagonals to: {out}"
-                except Exception as e:
-                    viewer.status = f"Export failed: {e}"
-
-            def _save_plot_html():
-                try:
-                    default_html = str((Path(output_folder) / f"radial_profile_{radial_line_profiles.tag.value}.html"))
-                    parent = getattr(viewer.window, "_qt_window", None)
-                    out, _ = QFileDialog.getSaveFileName(parent, "Save Plotly plot as HTML", default_html, "HTML (*.html)")
-                    if not out:
-                        return
-                    fig_lp.write_html(out, include_plotlyjs="cdn")
-                    viewer.status = f"Saved HTML plot: {out}"
-                except Exception as e:
-                    viewer.status = f"Save HTML failed: {e}"
-
-            def _save_plot_png():
-                try:
-                    import plotly.io as pio
-                    default_png = str((Path(output_folder) / f"radial_profile_{radial_line_profiles.tag.value}.png"))
-                    parent = getattr(viewer.window, "_qt_window", None)
-                    out, _ = QFileDialog.getSaveFileName(parent, "Save Plotly plot as PNG", default_png, "PNG (*.png)")
-                    if not out:
-                        return
-                    pio.write_image(fig_lp, out, scale=2)
-                    viewer.status = f"Saved PNG: {out}"
-                except Exception as e:
-                    viewer.status = f"⚠️ Save PNG failed: {e}"
-
-            # --- Connect buttons ---
-            btn_all.clicked.connect(_select_all)
-            btn_none.clicked.connect(_clear_sel)
-            btn_export_all.clicked.connect(_export_all_diagonals_csv)
-            btn_save_html.clicked.connect(_save_plot_html)
-            btn_save_png.clicked.connect(_save_plot_png)
-
-            _keep_refs(fig_lp, view_lp, panel_lp, btn_all, btn_none, btn_export_all, btn_save_html, btn_save_png)
+            _keep_refs(fig_lp, ax_lp, canvas_lp, panel_lp, btn_save_png, btn_save_csv)
 
         except Exception as e:
             viewer.status = f"⚠️ Radial Line Profiles disabled: {e}"
@@ -1587,7 +1472,7 @@ def show_analysis_results(
             tab_profiles_layout.addWidget(panel_lp)
             tabs.addTab(tab_profiles, "Radial Profiles")
 
-            _keep_refs(fig_lp, view_lp)
+            _keep_refs(fig_lp, canvas_lp)
 
 
     # --- Tab 4: PCC (metrics) ---
