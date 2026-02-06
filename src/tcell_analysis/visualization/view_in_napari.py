@@ -5,7 +5,6 @@ import pandas as pd
 import re as _re
 from tifffile import imread
 from tifffile import imread as _tiffread
-#import dask.array as daQtWebEngineWidgets
 import dask.array as da
 from dask import delayed
 from magicgui import magicgui
@@ -16,8 +15,6 @@ from qtpy.QtWidgets import QWidget, QVBoxLayout, QTabWidget, QLabel, QSlider
 from qtpy.QtWidgets import QPushButton, QFileDialog, QHBoxLayout, QSizePolicy
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QColor
-#from PyQt5.QtWebEngineWidgets import QWebEngineView
-#import plotly.graph_objects as go
 from matplotlib import cm
 from matplotlib.figure import Figure as _Fig
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -254,18 +251,31 @@ def show_analysis_results(
             clims.append((float(p1), float(p99)))
         return clims
 
-    def find_image_path(frame_dir: Path) -> Path:
+    def find_image_path(frame_dir: Path, prefer_raw: bool = False) -> Path:
         name = frame_dir.name
+
+        # 1) Prefer RAW if requested and exists
+        if prefer_raw:
+            p_raw = frame_dir / f"{name}.raw.tiff"
+            if p_raw.exists():
+                return p_raw
+
+        # 2) Otherwise use processed
         p = frame_dir / f"{name}.tiff"
         if p.exists():
             return p
+
+        # 3) Fallback: find any tif/tiff that isn't mask/raw
         cands = [
             q for q in frame_dir.glob("*.tif*")
-            if not q.name.lower().endswith("_mask.tiff") and "mask" not in q.name.lower()
+            if not q.name.lower().endswith("_mask.tiff")
+            and "mask" not in q.name.lower()
+            and ".raw." not in q.name.lower()
         ]
         if not cands:
-            raise FileNotFoundError(f"No multi-channel TIFF in {frame_dir}")
+            raise FileNotFoundError(f"No image TIFF in {frame_dir}")
         return sorted(cands)[0]
+
 
     def _eager_load_image_for_shape(path: Path):
         """Load image and return channels-last (H,W,C)."""
@@ -340,11 +350,21 @@ def show_analysis_results(
         frame_tags.append(tag)
         seg_names.append(seg_name)
         try:
-            image_paths.append(find_image_path(fd))
+            prefer_raw = str(seg_name).strip().lower() == "sirc"
+            image_paths.append(find_image_path(fd, prefer_raw=prefer_raw))
+
         except FileNotFoundError as e:
             print(f"[WARN] Skipping image for {fd}: {e}")
             image_paths.append(None)
 
+    # ---- Inform user whether RAW or processed images are shown ----
+    try:
+        if any(str(s).strip().lower() == "sirc" for s in seg_names):
+            viewer.status = "ℹ️ Segmentation channel is SIRC → displaying RAW images."
+        else:
+            viewer.status = "ℹ️ Displaying processed images."
+    except Exception:
+        pass
 
     if len(dfs) == 0:
         raise ValueError("Found frames, but none had both mask and per_cell_features.csv.")
@@ -386,9 +406,11 @@ def show_analysis_results(
         )
 
     # always add separate grayscale layers
+    
+
     for c in range(num_channels):
-        viewer.add_image(
-            image_stack[..., c],  # (F,H,W)
+        layer = viewer.add_image(
+            image_stack[..., c],
             name=ch_names[c],
             colormap="gray",
             blending="additive",
@@ -423,6 +445,7 @@ def show_analysis_results(
     names_valid     = [frame_dirs[i].name for i in valid_idxs]
     seg_names_valid = [seg_names[i] for i in valid_idxs]
 
+    seg_channel_name = seg_names_valid[0] if seg_names_valid else None
 
     # union of columns across frames
     all_columns = sorted(set().union(*[set(df.columns) for df in dfs_valid]))
@@ -469,6 +492,19 @@ def show_analysis_results(
         properties=all_properties,
         metadata={PLUGIN_TAG: True},
     )
+
+    # ---- DEFAULT VISIBILITY (SAFE LOCATION) ----
+    labels_layer.visible = True
+    points.visible = True
+
+    for layer in viewer.layers:
+        if layer.name in ("Mask Stack", "Cell Labels"):
+            layer.visible = True
+        elif layer.name == seg_channel_name:
+            layer.visible = True
+        else:
+            layer.visible = False
+
 
     points.edge_color = "red"
     points.text = {"string": texts_list, 
