@@ -7,33 +7,17 @@ It integrates **data preprocessing, segmentation, feature extraction, and intera
 
 ## ✨ Features
 
-- **TIFF conversion**
-- **Background correction** (e.g. rolling ball for ICAM1 channel)
+- **Microscopy format support**
+- **Background correction** (e.g. rolling-ball, Gaussian, top-hat)
 - **T-cell segmentation** with [Cellpose](https://www.cellpose.org/) (including denoising models)
-- **Per-cell feature extraction** (intensity metrics, shape, circularity, etc.)
-- **Single-cell image cropping**
+- **Per-cell feature extraction** (intensity metrics, shape descriptors, etc.)
+- **Single-cell cropping**
 - **Interactive visualization in Napari**:
   - Image + mask overlay  
-  - Per-cell properties and text labels  
-  - Filtering by shape features  
-  - Export results as CSV  
-
----
-
-## 📂 Project Structure
-
-```bash
-ismap-napari/           # Python package (Napari plugin)
-├── src/tcell_analysis  # Source code
-│   ├── analysis.py     # Main analysis pipeline
-│   ├── preprocessing/  # Background correction etc.
-│   ├── masking/        # Segmentation (Cellpose)
-│   ├── metrics.py      # Per-cell features
-│   ├── visualization/  # Napari visualization
-│   ├── _widget.py      # Napari widget definition
-│   └── napari.yaml     # Plugin manifest
-└── test_data/          # Example input files
-```
+  - Cell labels and per-cell properties
+  - Feature-based filtering
+  - Radial profiles and condition-wise comparisons
+  - Export of results as CSV and images 
 
 ---
 
@@ -46,17 +30,12 @@ cd isMap-napari
 ```
 
 ### 2. Create and activate a virtual environment
-Linux/macOS:
+Conda is strongly recommended.
 ```bash
 conda create -n venv-ismap -c conda-forge python=3.11
 conda activate venv-ismap
 ```
-
-Windows (PowerShell):
-```powershell
-python -m venv .venv-ismap
-.venv-ismap\Scripts\Activate.ps1
-```
+ℹ️ The plugin is tested on Python 3.11.
 
 ### 3. Install the plugin
 From inside the repo:
@@ -77,37 +56,43 @@ You should see:
 
 ## 🧪 Usage in Napari
 
-1. Start Napari:
+1. Launch Napari:
    ```bash
    napari
    ```
 2. Open the plugin:
-   **Plugins → isMap (immunological synapse map analysis program)**
+   **Plugins → isMap (immunological synapse Map analysis program)**
 3. In the docked widget:
-   - **Input Folder** → folder with `.nd2` files  
-   - **Output Folder** → where results are saved  
-   - **Channels** → e.g. `ICAM1,pTyr,Actin`  
-   - **Run Analysis** → runs processing with progress bar  
-4. After processing, results appear in the same Napari window:
-   - Multi-channel images  
-   - Actin segmentation masks  
-   - Points layer with per-cell properties + text labels  
-   - Interactive filters (circularity, eccentricity, diameter)  
-   - CSV export widget (choose save location)  
+   - **Select an Input Folder containing microscopy images**
+   - **Select an Output Folder for results**
+   - **Choose segmentation parameters (model, diameter, scale)**
+   - **Run segmentation**
+   - **Run full analysis**
+4. Visualization features include:
+   - Multi-channel image layers
+   - Segmentation masks and cell outlines
+   - Cell-level labels and properties
+   - Interactive filtering by morphology and intensity
+   - Radial profiles and condition comparisons
+   - Export of filtered results to CSV
 
 ---
 
 ## 📦 Requirements
 
-- Python **3.10+**
-- Core:
-  - `numpy`, `pandas`, `scikit-image`, `opencv-python`, `tifffile`
-- Deep learning:
-  - `torch`, `torchvision`, `cellpose==3.1.1.2`
-- Napari & GUI:
-  - `napari[all]`, `magicgui`, `qtpy`
-- Others:
-  - `scikit-learn`, `nd2reader`
+- Python ≥ 3.10
+- Napari + Qt (via conda)
+- Cellpose + PyTorch
+- Scientific Python stack (numpy, pandas, scikit-image, etc.)
+
+All dependencies are resolved automatically when installing via conda + pip.
+
+---
+## Notes on GPU Support
+
+Cellpose uses **PyTorch**
+If a CUDA-compatible NVIDIA GPU is available, Cellpose will run on GPU automatically.
+On macOS, Cellpose typically runs on CPU.
 
 ---
 
