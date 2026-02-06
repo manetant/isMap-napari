@@ -48,8 +48,8 @@ cd isMap-napari
 ### 2. Create and activate a virtual environment
 Linux/macOS:
 ```bash
-python3 -m venv .venv-ismap
-source .venv-ismap/bin/activate
+conda create -n venv-ismap -c conda-forge python=3.11
+conda activate venv-ismap
 ```
 
 Windows (PowerShell):
