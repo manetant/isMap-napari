@@ -87,7 +87,9 @@ where = ["src"]
 
 [tool.setuptools_scm]
 write_to = "src/tcell_analysis/_version.py"
-fallback_version = "0.0.1+nogit"
+fallback_version = "0.0.1"
+version_scheme = "post-release"
+local_scheme = "no-local-version"
 
 [tool.black]
 line-length = 79
